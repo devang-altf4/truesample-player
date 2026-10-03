@@ -1,0 +1,23 @@
+# Music files are copyrighted test material — never commit them
+*.flac
+*.wav
+*.mp3
+*.ape
+*.wv
+*.dsf
+*.dff
+
+# Gradle / Android
+.gradle/
+build/
+local.properties
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+.DS_Store
