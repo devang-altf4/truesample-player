@@ -61,11 +61,14 @@ JNIEXPORT jintArray JNICALL JNI_FN(nativeFormats)(JNIEnv* env, jobject, jlong h)
 }
 
 // Returns outputIndex, deviceRate, subslotBytes, bitResolution, bitPerfect, outputRate, resampled.
+// modeIndex/modeRate pick a fixed output mode; modeIndex < 0 means automatic.
 JNIEXPORT jintArray JNICALL JNI_FN(nativeStart)(JNIEnv* env, jobject, jlong h, jint rate, jint bits, jint channels,
-                                               jint quality) {
+                                               jint quality, jint modeIndex, jint modeRate) {
     UsbStreamer::StreamInfo info;
     std::string error;
-    if (!streamer(h)->start(uint32_t(rate), uint32_t(bits), uint32_t(channels), int(quality), info, error)) {
+    UsbStreamer::Mode mode{modeIndex, uint32_t(modeRate)};
+    if (!streamer(h)->start(uint32_t(rate), uint32_t(bits), uint32_t(channels), int(quality),
+                            modeIndex >= 0 ? &mode : nullptr, info, error)) {
         throwUsbAudio(env, error);
         return nullptr;
     }
@@ -122,9 +125,23 @@ extern "C" JNIEXPORT void JNICALL JNI_FN(nativeSetLogFile)(JNIEnv* env, jobject,
 
 // Returns outputRate, dacBits, resampled, bitPerfect — or null if the DAC cannot play it at all.
 extern "C" JNIEXPORT jintArray JNICALL JNI_FN(nativePlan)(JNIEnv* env, jobject, jlong h, jint rate, jint bits,
-                                                        jint channels) {
+                                                        jint channels, jint modeIndex, jint modeRate) {
     UsbStreamer::Plan p;
     std::string error;
-    if (!streamer(h)->plan(uint32_t(rate), uint32_t(bits), uint32_t(channels), p, error)) return nullptr;
+    UsbStreamer::Mode mode{modeIndex, uint32_t(modeRate)};
+    if (!streamer(h)->plan(uint32_t(rate), uint32_t(bits), uint32_t(channels), modeIndex >= 0 ? &mode : nullptr, p,
+                           error)) {
+        return nullptr;
+    }
     return toIntArray(env, {jint(p.outputRate), jint(p.dacBits), p.resampling ? 1 : 0, p.lossless ? 1 : 0});
+}
+
+// Flattened per mode: outputIndex, sampleRate, bitResolution, subslotBytes, channels.
+extern "C" JNIEXPORT jintArray JNICALL JNI_FN(nativeModes)(JNIEnv* env, jobject, jlong h) {
+    std::vector<jint> out;
+    for (const UsbStreamer::Mode& m : streamer(h)->modes()) {
+        out.insert(out.end(), {m.outputIndex, jint(m.sampleRate), jint(m.bitResolution), jint(m.subslotBytes),
+                               jint(m.channels)});
+    }
+    return toIntArray(env, out);
 }

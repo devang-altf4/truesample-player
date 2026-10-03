@@ -111,6 +111,7 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
             controlFeature(kSetCur, kMuteControl, 0, &off, 1);
         }
         for (const auto& [ch, value] : savedVolume_) LOGI("DAC volume channel %u was %.1f dB", ch, value / 256.0);
+        rangeCache_ = volumeRange();
         setVolume(kStartVolume);
     }
     LOGI("opened DAC:\n%s", uac::describe(device_).c_str());
@@ -118,7 +119,7 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
 }
 
 bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality,
-                        StreamInfo& info, std::string& error) {
+                        const Mode* fixedMode, StreamInfo& info, std::string& error) {
     stop();
     if (!handle_) {
         error = "DAC is not open.";
@@ -126,7 +127,7 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     }
 
     Plan p;
-    if (!plan(sampleRate, sourceBits, channels, p, error)) return false;
+    if (!plan(sampleRate, sourceBits, channels, fixedMode, p, error)) return false;
     const int best = p.outputIndex;
     const uint32_t outRate = p.outputRate;
     const bool resampling = p.resampling;
@@ -238,17 +239,33 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     return true;
 }
 
-bool UsbStreamer::plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, Plan& out,
-                       std::string& error) const {
+bool UsbStreamer::plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, const Mode* fixedMode,
+                       Plan& out, std::string& error) const {
     if (!handle_) {
         error = "DAC is not open.";
         return false;
     }
     auto fits = [&](const uac::OutputFormat& f, uint32_t rate) {
-        if (f.formatTag != 1 || f.channels != channels || !f.supportsRate(rate)) return false;
-        const uint32_t maxFrames = uac::PacketScheduler(rate, packetsPerSecond(f)).maxFrames();
-        return maxFrames * f.frameBytes() <= f.maxPacketBytes;
+        return f.channels == channels && fitsBandwidth(f, rate);
     };
+
+    // A mode the user picked: convert every song to it.
+    if (fixedMode) {
+        const int i = fixedMode->outputIndex;
+        if (i < 0 || size_t(i) >= device_.outputs.size() || !fits(device_.outputs[size_t(i)], fixedMode->sampleRate)) {
+            char msg[160];
+            std::snprintf(msg, sizeof msg, "The chosen output mode can't play this %u-channel song.", channels);
+            error = msg;
+            return false;
+        }
+        const uac::OutputFormat& f = device_.outputs[size_t(i)];
+        out.outputIndex = i;
+        out.outputRate = fixedMode->sampleRate;
+        out.resampling = out.outputRate != sampleRate;
+        out.lossless = !out.resampling && f.bitResolution >= sourceBits;
+        out.dacBits = f.bitResolution;
+        return true;
+    }
 
     // Play at the source rate when the DAC has it; otherwise resample to the best rate it does have.
     std::vector<uint32_t> candidates;
@@ -291,6 +308,31 @@ bool UsbStreamer::plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channe
     out.resampling = resampling;
     out.dacBits = device_.outputs[out.outputIndex].bitResolution;
     return true;
+}
+
+bool UsbStreamer::fitsBandwidth(const uac::OutputFormat& f, uint32_t rate) const {
+    if (f.formatTag != 1 || !f.supportsRate(rate)) return false;
+    const uint32_t maxFrames = uac::PacketScheduler(rate, packetsPerSecond(f)).maxFrames();
+    return maxFrames * f.frameBytes() <= f.maxPacketBytes;
+}
+
+std::vector<UsbStreamer::Mode> UsbStreamer::modes() const {
+    static const uint32_t kCommonRates[] = {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000};
+    std::vector<Mode> result;
+    if (!handle_) return result;
+    for (size_t i = 0; i < device_.outputs.size(); ++i) {
+        const uac::OutputFormat& f = device_.outputs[i];
+        std::vector<uint32_t> rates = f.rates;
+        if (f.continuousRates) {
+            for (uint32_t r : kCommonRates) {
+                if (r >= f.minRate && r <= f.maxRate) rates.push_back(r);
+            }
+        }
+        for (uint32_t r : rates) {
+            if (fitsBandwidth(f, r)) result.push_back({int(i), r, f.bitResolution, f.subslotBytes, f.channels});
+        }
+    }
+    return result;
 }
 
 uint32_t UsbStreamer::packetsPerSecond(const uac::OutputFormat& f) const {
@@ -540,7 +582,8 @@ UsbStreamer::VolumeRange UsbStreamer::volumeRange() {
 }
 
 bool UsbStreamer::setVolume(int16_t value) {
-    const VolumeRange range = volumeRange();
+    // The range is cached, so moving the slider costs no extra USB round trips.
+    const VolumeRange range = rangeCache_.available ? rangeCache_ : volumeRange();
     if (!range.available) return false;
     value = std::clamp(value, range.min, range.max);
     uint8_t buf[2] = {uint8_t(value), uint8_t(uint16_t(value) >> 8)};

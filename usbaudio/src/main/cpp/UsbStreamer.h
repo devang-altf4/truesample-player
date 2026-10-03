@@ -53,6 +53,15 @@ public:
         bool lossless = false;  // bit-perfect
     };
 
+    // One way the DAC can run: a playback format at a sample rate.
+    struct Mode {
+        int outputIndex = -1;
+        uint32_t sampleRate = 0;
+        uint32_t bitResolution = 0;
+        uint32_t subslotBytes = 0;
+        uint32_t channels = 0;
+    };
+
     ~UsbStreamer();
 
     // `fd` comes from UsbDeviceConnection.getFileDescriptor(); the caller keeps it
@@ -60,11 +69,16 @@ public:
     bool open(int fd, const uint8_t* rawDescriptors, size_t length, std::string& error);
     const uac::UacDevice& device() const { return device_; }
 
+    // Every mode the DAC can actually stream (rate x format, within USB bandwidth).
+    std::vector<Mode> modes() const;
+
     // resampleQuality: 0 = best, 1 = medium, 2 = fast (libsamplerate sinc converters).
-    bool start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality, StreamInfo& info,
-               std::string& error);
+    // fixedMode: play every song in this mode; nullptr picks the best mode per song.
+    bool start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality, const Mode* fixedMode,
+               StreamInfo& info, std::string& error);
     // Works out how start() would play this format, without touching the DAC.
-    bool plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, Plan& plan, std::string& error) const;
+    bool plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, const Mode* fixedMode, Plan& plan,
+              std::string& error) const;
     // Blocks until all frames are queued. Returns frames queued, or -1 if the
     // stream stopped or the device went away.
     long write(const int32_t* interleaved, size_t frames);
@@ -83,6 +97,7 @@ private:
     bool resampleAndPush(size_t frames, bool endOfInput);  // frames already in resampleIn_
     void eventLoop();
     uint32_t packetsPerSecond(const uac::OutputFormat& format) const;
+    bool fitsBandwidth(const uac::OutputFormat& format, uint32_t rate) const;
     int controlFeature(uint8_t request, uint8_t control, uint8_t channel, uint8_t* data, uint16_t length);
     std::vector<uint8_t> volumeChannels() const;
 
@@ -92,6 +107,7 @@ private:
     const uac::FeatureUnit* featureUnit_ = nullptr;
     std::vector<std::pair<uint8_t, int16_t>> savedVolume_;  // DAC's own volume per channel, restored on close
     int savedMute_ = -1;
+    VolumeRange rangeCache_;  // min/max/res never change, so read them once
 
     // Active stream
     const uac::OutputFormat* format_ = nullptr;

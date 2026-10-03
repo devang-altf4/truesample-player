@@ -43,6 +43,16 @@ data class StreamInfo(
     val resampled: Boolean,
 )
 
+/** One way the DAC can run, from [UsbAudioOutput.outputModes]. */
+data class OutputMode(
+    /** Index into [UsbAudioOutput.formats]. */
+    val formatIndex: Int,
+    val sampleRate: Int,
+    val bitsPerSample: Int,
+    val subslotBytes: Int,
+    val channels: Int,
+)
+
 /** How a source format would play on a DAC, from [UsbAudioOutput.plan]. */
 data class PlaybackPlan(
     val outputRate: Int,
@@ -85,6 +95,15 @@ class UsbAudioOutput private constructor(
 
     val formats: List<DacFormat> = parseFormats(NativeBridge.nativeFormats(handle))
 
+    /**
+     * Every mode the DAC can stream, highest quality first: each playback format at each
+     * sample rate it supports, limited to what fits the USB link.
+     */
+    val outputModes: List<OutputMode> = NativeBridge.nativeModes(handle).toList().chunked(5)
+        .map { OutputMode(formatIndex = it[0], sampleRate = it[1], bitsPerSample = it[2], subslotBytes = it[3], channels = it[4]) }
+        .distinct()
+        .sortedWith(compareByDescending<OutputMode> { it.sampleRate }.thenByDescending { it.bitsPerSample })
+
     /** The hardware volume range, or null when the DAC has no volume control. */
     val volumeRange: VolumeRange?
         get() = synchronized(lock) {
@@ -95,19 +114,22 @@ class UsbAudioOutput private constructor(
 
     /**
      * Selects the matching DAC mode and starts streaming silence until [write] supplies audio.
-     * If the DAC lacks [sampleRate], audio is resampled (with [quality]) to the best rate it
-     * supports; if it has fewer bits than [bitsPerSample], audio is reduced with TPDF dither.
-     * Either way [StreamInfo.bitPerfect] is false. Throws [UsbAudioException] if the DAC has no
-     * output with [channels] channels.
+     * With [mode] null the DAC runs at the source rate when it can (bit-perfect); otherwise
+     * audio is converted to [mode], or to the best rate the DAC has. Conversion resamples with
+     * [quality], and reducing bit depth uses TPDF dither; [StreamInfo.bitPerfect] is then false.
+     * Throws [UsbAudioException] if the DAC (or [mode]) has no output with [channels] channels.
      */
     fun start(
         sampleRate: Int,
         bitsPerSample: Int,
         channels: Int,
         quality: ResampleQuality = ResampleQuality.BEST,
+        mode: OutputMode? = null,
     ): StreamInfo = synchronized(lock) {
         checkOpen()
-        val r = NativeBridge.nativeStart(handle, sampleRate, bitsPerSample, channels, quality.ordinal)
+        val r = NativeBridge.nativeStart(
+            handle, sampleRate, bitsPerSample, channels, quality.ordinal, mode?.formatIndex ?: -1, mode?.sampleRate ?: 0,
+        )
         StreamInfo(
             sampleRate = sampleRate,
             bitsPerSample = bitsPerSample,
@@ -124,9 +146,16 @@ class UsbAudioOutput private constructor(
      * Works out how a source format would be played on this DAC without starting
      * anything, or returns null if the DAC cannot play it at all (e.g. wrong channel count).
      */
-    fun plan(sampleRate: Int, bitsPerSample: Int, channels: Int): PlaybackPlan? = synchronized(lock) {
+    fun plan(
+        sampleRate: Int,
+        bitsPerSample: Int,
+        channels: Int,
+        mode: OutputMode? = null,
+    ): PlaybackPlan? = synchronized(lock) {
         checkOpen()
-        val r = NativeBridge.nativePlan(handle, sampleRate, bitsPerSample, channels) ?: return null
+        val r = NativeBridge.nativePlan(
+            handle, sampleRate, bitsPerSample, channels, mode?.formatIndex ?: -1, mode?.sampleRate ?: 0,
+        ) ?: return null
         PlaybackPlan(outputRate = r[0], dacBits = r[1], resampled = r[2] == 1, bitPerfect = r[3] == 1)
     }
 
