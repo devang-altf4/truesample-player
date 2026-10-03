@@ -22,6 +22,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
 import com.freeaudiobypasser.app.ui.HifiTheme
 import com.freeaudiobypasser.app.ui.PlayerScreen
@@ -183,6 +184,37 @@ class MainActivity : ComponentActivity(), PlayerActions {
         pickFile.launch(arrayOf("audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/*"))
 
     override fun allowMusic() = requestAudioPermission.launch(audioPermission)
+
+    override fun shareDiagnostics() {
+        val report = buildString {
+            appendLine("Free Audio Bypasser ${BuildConfig.VERSION_NAME} diagnostics")
+            appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+            appendLine("DAC: ${state.dac}")
+            usbManager.deviceList.values.forEach {
+                appendLine("USB device: ${it.productName} VID %04x PID %04x".format(it.vendorId, it.productId))
+            }
+            filesDir.listFiles { f -> f.name.startsWith("dac-descriptors-") }?.forEach { f ->
+                appendLine()
+                appendLine("=== ${f.name}")
+                appendLine(f.readBytes().joinToString(" ") { "%02x".format(it) })
+            }
+            for (name in listOf("usbaudio.log", "app.log")) {
+                val lines = File(filesDir, name).takeIf { it.exists() }?.readLines().orEmpty()
+                appendLine()
+                appendLine("=== $name (last ${minOf(lines.size, 1500)} lines)")
+                lines.takeLast(1500).forEach(::appendLine)
+            }
+        }
+        val dir = File(cacheDir, "diagnostics").apply { mkdirs() }
+        val file = File(dir, "free-audio-bypasser-diagnostics.txt").apply { writeText(report) }
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .putExtra(Intent.EXTRA_SUBJECT, "Free Audio Bypasser diagnostics")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(send, "Share diagnostics"))
+    }
 
     override fun formatOf(track: Track): Result<SourceFormat>? = library.format(track)
 

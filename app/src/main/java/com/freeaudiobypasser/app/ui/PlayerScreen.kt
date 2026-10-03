@@ -110,7 +110,7 @@ fun PlayerScreen(state: PlayerState, actions: PlayerActions) {
         } else if (state.tracks.isEmpty()) {
             item {
                 Text(
-                    "No FLAC or WAV files on this phone yet. Copy some over, or use Open file.",
+                    "No music on this phone yet. Copy some over, or use Open file.",
                     style = HifiType.Caption,
                     modifier = Modifier.padding(vertical = 12.dp),
                 )
@@ -130,7 +130,7 @@ fun PlayerScreen(state: PlayerState, actions: PlayerActions) {
         item { Spacer(Modifier.height(24.dp)) }
     }
 
-    if (showLog) LogDialog(state.log) { showLog = false }
+    if (showLog) LogDialog(state.log, onShare = actions::shareDiagnostics) { showLog = false }
 }
 
 // ---- Header and DAC ------------------------------------------------------------------------
@@ -312,9 +312,9 @@ private fun NowPlaying(state: PlayerState, actions: PlayerActions) {
         val plan = if (format != null && dacInUse) actions.planFor(format) else null
 
         Spacer(Modifier.height(14.dp))
-        SignalPath(format, plan)
+        SignalPath(format, plan, track.codec)
         Spacer(Modifier.height(12.dp))
-        Verdict(format, plan, dacInUse, state.chosenMode)
+        Verdict(format, plan, dacInUse, state.chosenMode, track.codec)
         state.notice?.let {
             Spacer(Modifier.height(6.dp))
             Text(it, style = HifiType.Caption.copy(color = Hifi.Amber))
@@ -327,6 +327,10 @@ private fun NowPlaying(state: PlayerState, actions: PlayerActions) {
     }
 }
 
+/** "24/48" for lossless files; "MP3 44.1" for lossy ones, where a bit depth means nothing. */
+private fun sourceLabel(format: SourceFormat, codec: String, separator: String = "/"): String =
+    if (format.lossy) "$codec$separator${khz(format.sampleRate)}" else "${format.bitsPerSample}/${khz(format.sampleRate)}"
+
 private enum class StageLamp { OFF, PASS, ALTER }
 
 private data class Stage(val label: String, val value: String, val lamp: StageLamp)
@@ -336,20 +340,20 @@ private data class Stage(val label: String, val value: String, val lamp: StageLa
  * each lit green when the audio passes untouched and amber when it is altered.
  */
 @Composable
-private fun SignalPath(format: SourceFormat?, plan: PlaybackPlan?) {
+private fun SignalPath(format: SourceFormat?, plan: PlaybackPlan?, codec: String) {
     val off = { label: String -> Stage(label, "—", StageLamp.OFF) }
     val stages = if (format == null || plan == null) {
         listOf(
-            format?.let { Stage("SOURCE", "${it.bitsPerSample}/${khz(it.sampleRate)}", StageLamp.PASS) } ?: off("SOURCE"),
+            format?.let { Stage("SOURCE", sourceLabel(it, codec), StageLamp.PASS) } ?: off("SOURCE"),
             off("RATE"), off("DEPTH"), off("DAC"),
         )
     } else {
         listOf(
-            Stage("SOURCE", "${format.bitsPerSample}/${khz(format.sampleRate)}", StageLamp.PASS),
+            Stage("SOURCE", sourceLabel(format, codec), StageLamp.PASS),
             if (plan.resampled) Stage("RATE", "${khz(format.sampleRate)}→${khz(plan.outputRate)}", StageLamp.ALTER)
             else Stage("RATE", "PASS", StageLamp.PASS),
             if (plan.dacBits < format.bitsPerSample) {
-                Stage("DEPTH", "${format.bitsPerSample}→${plan.dacBits}", StageLamp.ALTER)
+                Stage("DEPTH", if (format.lossy) "→${plan.dacBits}" else "${format.bitsPerSample}→${plan.dacBits}", StageLamp.ALTER)
             } else {
                 Stage("DEPTH", "PASS", StageLamp.PASS)
             },
@@ -393,7 +397,13 @@ private fun StageCell(stage: Stage, index: Int, modifier: Modifier) {
 }
 
 @Composable
-private fun Verdict(format: SourceFormat?, plan: PlaybackPlan?, dacInUse: Boolean, chosenMode: OutputMode?) {
+private fun Verdict(
+    format: SourceFormat?,
+    plan: PlaybackPlan?,
+    dacInUse: Boolean,
+    chosenMode: OutputMode?,
+    codec: String,
+) {
     val word: String
     val color: Color
     val detail: String
@@ -408,6 +418,11 @@ private fun Verdict(format: SourceFormat?, plan: PlaybackPlan?, dacInUse: Boolea
         plan == null -> {
             word = "CAN'T PLAY"; color = Hifi.Fault
             detail = "Your DAC has no mode for a ${format.channels}-channel song."
+        }
+        format.lossy -> {
+            word = "LOSSY SOURCE"; color = Hifi.Amber
+            detail = "$codec is a lossy format, so bit-perfect doesn't apply. It's decoded on the phone and sent " +
+                "straight to your DAC at ${khz(plan.outputRate)} kHz / ${plan.dacBits}-bit, skipping Android's mixer."
         }
         plan.bitPerfect -> {
             word = "BIT-PERFECT"; color = Hifi.Vfd
@@ -568,7 +583,7 @@ private fun PermissionCard(onAllow: () -> Unit) {
             .border(1.dp, Hifi.Hairline, shape)
             .padding(16.dp),
     ) {
-        Text("See the FLAC and WAV files on this phone.", style = HifiType.Body.copy(color = Hifi.Ink))
+        Text("See the music on this phone.", style = HifiType.Body.copy(color = Hifi.Ink))
         Text("The app only reads your music. Nothing leaves the phone.", style = HifiType.Caption)
         Spacer(Modifier.height(12.dp))
         Button(
@@ -585,7 +600,7 @@ private fun formatTag(track: Track, state: PlayerState, actions: PlayerActions):
     // Reading formatsVersion re-runs this once the file's header has been parsed.
     val result = state.formatsVersion.let { actions.formatOf(track) } ?: return FormatTag("···", Hifi.Label)
     val format = result.getOrNull() ?: return FormatTag("ERR", Hifi.Fault)
-    val text = "${format.bitsPerSample}/${khz(format.sampleRate)}"
+    val text = sourceLabel(format, track.codec, separator = " ")
     if (state.dac !is DacStatus.InUse) return FormatTag(text, Hifi.Label)
     val plan = actions.planFor(format)
     return FormatTag(
@@ -643,10 +658,11 @@ private fun TrackRow(
 }
 
 @Composable
-private fun LogDialog(lines: List<String>, onClose: () -> Unit) {
+private fun LogDialog(lines: List<String>, onShare: () -> Unit, onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
         confirmButton = { TextButton(onClick = onClose) { Text("Close", color = Hifi.Vfd) } },
+        dismissButton = { TextButton(onClick = onShare) { Text("Share diagnostics", color = Hifi.Ink) } },
         title = { Text("Driver log", style = HifiType.Title.copy(color = Hifi.Ink)) },
         text = {
             LazyColumn(Modifier.heightIn(max = 440.dp)) {

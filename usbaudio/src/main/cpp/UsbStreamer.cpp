@@ -21,6 +21,8 @@ void onLibusbLog(libusb_context*, enum libusb_log_level level, const char* messa
 }
 
 constexpr int kTransfersInFlight = 8;
+constexpr int kFeedbackTransfers = 2;
+constexpr int kFeedbackPackets = 4;
 constexpr uint32_t kTransferMillis = 10;   // audio per transfer
 constexpr uint32_t kRingMillis = 500;      // decoded audio buffered ahead of USB
 constexpr int16_t kStartVolume = -30 * 256;  // quiet start: IEMs are sensitive
@@ -35,12 +37,20 @@ constexpr uint8_t kMuteControl = 0x01;
 constexpr uint8_t kVolumeControl = 0x02;
 constexpr uint8_t kSamplingFreqControl = 0x01;
 
+// UAC2 class requests (bRequest; direction comes from bmRequestType)
+constexpr uint8_t kUac2Cur = 0x01;
+constexpr uint8_t kUac2Range = 0x02;
+constexpr uint8_t kClockSelectorControl = 0x01;
+
 constexpr uint8_t kReqOutInterface = 0x21;
 constexpr uint8_t kReqInInterface = 0xA1;
 constexpr uint8_t kReqOutEndpoint = 0x22;
 constexpr uint8_t kReqInEndpoint = 0xA2;
 
 int16_t le16(const uint8_t* p) { return int16_t(p[0] | (p[1] << 8)); }
+uint32_t le32(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
 
 }  // namespace
 
@@ -50,10 +60,6 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
     device_ = uac::parseDescriptors(raw, length);
     if (device_.uacVersion == 0) {
         error = "This USB device is not a USB Audio device.";
-        return false;
-    }
-    if (device_.uacVersion == 2) {
-        error = "This is a USB Audio Class 2 DAC. UAC2 support arrives in milestone 2.";
         return false;
     }
     if (device_.outputs.empty()) {
@@ -93,6 +99,17 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
 
     eventThreadRun_ = true;
     eventThread_ = std::thread(&UsbStreamer::eventLoop, this);
+
+    highSpeed_ = libusb_get_device_speed(libusb_get_device(handle_)) >= LIBUSB_SPEED_HIGH;
+    if (device_.uacVersion == 2) {
+        loadUac2Rates();
+        if (std::all_of(device_.outputs.begin(), device_.outputs.end(),
+                        [](const uac::OutputFormat& f) { return f.rates.empty(); })) {
+            error = "The DAC did not report which sample rates it supports.";
+            close();
+            return false;
+        }
+    }
 
     featureUnit_ = uac::findPlaybackFeatureUnit(device_, device_.outputs[0]);
     if (featureUnit_) {
@@ -135,6 +152,12 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
 
     format_ = &device_.outputs[best];
     const uac::OutputFormat& f = *format_;
+    uint32_t deviceRate = 0;
+    // UAC2: the rate lives on the clock and is changed while the interface is idle (alt 0).
+    if (device_.uacVersion == 2 && !setUac2Rate(size_t(best), outRate, deviceRate, error)) {
+        format_ = nullptr;
+        return false;
+    }
     int rc = libusb_set_interface_alt_setting(handle_, f.interfaceNumber, f.altSetting);
     if (rc != LIBUSB_SUCCESS) {
         error = std::string("Could not select the DAC's playback mode: ") + libusb_error_name(rc);
@@ -142,8 +165,7 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         return false;
     }
 
-    uint32_t deviceRate = 0;
-    if (f.sampleRateControl || f.continuousRates || f.rates.size() > 1) {
+    if (device_.uacVersion == 1 && (f.sampleRateControl || f.continuousRates || f.rates.size() > 1)) {
         uint8_t data[3] = {uint8_t(outRate), uint8_t(outRate >> 8), uint8_t(outRate >> 16)};
         rc = libusb_control_transfer(handle_, kReqOutEndpoint, kSetCur, kSamplingFreqControl << 8,
                                      f.endpointAddress, data, 3, 1000);
@@ -186,8 +208,10 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
 
     channels_ = channels;
     const uint32_t pps = packetsPerSecond(f);
-    scheduler_ = std::make_unique<uac::PacketScheduler>(outRate, pps);
     frameBytes_ = f.frameBytes();
+    // Async DACs may ask for a little more than nominal; never exceed what a packet carries.
+    const uint32_t capFrames = std::max<uint32_t>(f.maxPacketBytes / frameBytes_, 1);
+    scheduler_ = std::make_unique<uac::PacketScheduler>(outRate, pps, capFrames);
     sourceSubslot_ = f.subslotBytes;
     packetsPerTransfer_ = std::max<uint32_t>(1, pps * kTransferMillis / 1000);
     ring_ = std::make_unique<uac::RingBuffer>(size_t(outRate) * frameBytes_ * kRingMillis / 1000);
@@ -199,7 +223,7 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         ditherBuffer_.resize(maxPushFrames_ * f.channels);
     }
 
-    const size_t transferBytes = size_t(packetsPerTransfer_) * scheduler_->maxFrames() * frameBytes_;
+    const size_t transferBytes = size_t(packetsPerTransfer_) * capFrames * frameBytes_;
     transferBuffers_.assign(kTransfersInFlight, std::vector<uint8_t>(transferBytes));
     for (int i = 0; i < kTransfersInFlight; ++i) {
         libusb_transfer* t = libusb_alloc_transfer(int(packetsPerTransfer_));
@@ -222,6 +246,14 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
             error = std::string("Could not start USB streaming: ") + libusb_error_name(rc);
             stop();
             return false;
+        }
+    }
+    if (f.syncType == uac::SyncType::Async) {
+        if (f.feedbackEndpoint) {
+            startFeedback(f, outRate, pps);
+        } else {
+            LOGW("async endpoint without a feedback endpoint (implicit feedback is not supported yet): "
+                 "streaming at the nominal rate");
         }
     }
 
@@ -333,6 +365,160 @@ std::vector<UsbStreamer::Mode> UsbStreamer::modes() const {
         }
     }
     return result;
+}
+
+void UsbStreamer::loadUac2Rates() {
+    auto selectedPin = [this](uint8_t selector) -> int {
+        uint8_t pin = 0;
+        const int rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Cur, kClockSelectorControl << 8,
+                                               uint16_t((selector << 8) | device_.controlInterface), &pin, 1, 1000);
+        return rc == 1 ? pin : 0;
+    };
+    clockSources_.assign(device_.outputs.size(), 0);
+    std::vector<std::pair<uint8_t, std::vector<uint32_t>>> cache;
+    for (size_t i = 0; i < device_.outputs.size(); ++i) {
+        uac::OutputFormat& f = device_.outputs[i];
+        const uint8_t source = uac::resolveClockSource(device_, f.clockId, selectedPin);
+        clockSources_[i] = source;
+        if (source == 0) {
+            LOGW("alt %u: no clock source reachable from clock %u", f.altSetting, f.clockId);
+            continue;
+        }
+        auto it = std::find_if(cache.begin(), cache.end(), [&](const auto& e) { return e.first == source; });
+        if (it == cache.end()) {
+            cache.push_back({source, readClockRates(source)});
+            it = cache.end() - 1;
+        }
+        f.rates = it->second;
+    }
+}
+
+std::vector<uint32_t> UsbStreamer::readClockRates(uint8_t source) {
+    const uint16_t index = uint16_t((source << 8) | device_.controlInterface);
+    // RANGE: first the number of sub-ranges, then all of them (as Linux does).
+    uint8_t head[2] = {};
+    int rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Range, kSamplingFreqControl << 8, index, head,
+                                     2, 1000);
+    if (rc == 2) {
+        const size_t ranges = size_t(head[0] | (head[1] << 8));
+        std::vector<uint8_t> buf(2 + 12 * ranges);
+        rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Range, kSamplingFreqControl << 8, index,
+                                     buf.data(), uint16_t(buf.size()), 1000);
+        if (rc >= 2) {
+            std::vector<uint32_t> rates = uac::ratesFromRange(buf.data(), size_t(rc));
+            if (!rates.empty()) return rates;
+        }
+    }
+    LOGW("clock %u: RANGE request failed (%s), using its current rate", source,
+         rc < 0 ? libusb_error_name(rc) : "short reply");
+    uint8_t cur[4] = {};
+    rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Cur, kSamplingFreqControl << 8, index, cur, 4, 1000);
+    if (rc == 4 && le32(cur) != 0) return {le32(cur)};
+    return {};
+}
+
+bool UsbStreamer::setUac2Rate(size_t outputIndex, uint32_t rate, uint32_t& deviceRate, std::string& error) {
+    const uint8_t source = outputIndex < clockSources_.size() ? clockSources_[outputIndex] : 0;
+    if (source == 0) {
+        error = "The DAC's clock could not be found.";
+        return false;
+    }
+    const uint16_t index = uint16_t((source << 8) | device_.controlInterface);
+    auto readRate = [&]() -> uint32_t {
+        uint8_t cur[4] = {};
+        const int rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Cur, kSamplingFreqControl << 8, index,
+                                               cur, 4, 1000);
+        return rc == 4 ? le32(cur) : 0;
+    };
+    uint32_t current = readRate();
+    if (current != rate) {
+        const uac::Clock* clock = uac::findClock(device_, source);
+        if (clock && !clock->frequencyWritable && current != 0) {
+            char msg[128];
+            std::snprintf(msg, sizeof msg, "The DAC's clock is fixed at %u Hz.", current);
+            error = msg;
+            return false;
+        }
+        uint8_t data[4] = {uint8_t(rate), uint8_t(rate >> 8), uint8_t(rate >> 16), uint8_t(rate >> 24)};
+        const int rc = libusb_control_transfer(handle_, kReqOutInterface, kUac2Cur, kSamplingFreqControl << 8, index,
+                                               data, 4, 1000);
+        if (rc < 0) LOGW("clock %u: setting %u Hz failed: %s", source, rate, libusb_error_name(rc));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));  // let the DAC's clock relock
+        current = readRate();
+    }
+    deviceRate = current;
+    if (current != 0 && current != rate) {
+        char msg[128];
+        std::snprintf(msg, sizeof msg, "The DAC was asked for %u Hz but its clock runs at %u Hz.", rate, current);
+        error = msg;
+        return false;
+    }
+    LOGI("clock %u at %u Hz", source, current);
+    return true;
+}
+
+void UsbStreamer::startFeedback(const uac::OutputFormat& f, uint32_t rate, uint32_t pps) {
+    // Feedback is per (micro)frame; a data packet may span several when bInterval > 1.
+    const uint32_t unitsPerSecond = highSpeed_ ? 8000 : 1000;
+    unitsPerPacket_ = std::max<uint32_t>(1, unitsPerSecond / pps);
+    nominalUnitQ16_ = uint32_t((uint64_t(rate) << 16) / unitsPerSecond);
+    feedbackShift_ = uac::kUnknownShift;
+    feedbackSeen_ = false;
+    const int packetSize = f.feedbackMaxPacket ? f.feedbackMaxPacket : (highSpeed_ ? 4 : 3);
+    for (int i = 0; i < kFeedbackTransfers; ++i) {
+        transferBuffers_.emplace_back(size_t(packetSize) * kFeedbackPackets);
+        libusb_transfer* t = libusb_alloc_transfer(kFeedbackPackets);
+        libusb_fill_iso_transfer(t, handle_, f.feedbackEndpoint, transferBuffers_.back().data(),
+                                 packetSize * kFeedbackPackets, kFeedbackPackets, &UsbStreamer::onFeedbackDone, this,
+                                 0);
+        libusb_set_iso_packet_lengths(t, unsigned(packetSize));
+        transfers_.push_back(t);
+        ++inFlight_;
+        const int rc = libusb_submit_transfer(t);
+        if (rc != LIBUSB_SUCCESS) {
+            --inFlight_;
+            LOGW("feedback endpoint 0x%02x: submit failed (%s), streaming at the nominal rate", f.feedbackEndpoint,
+                 libusb_error_name(rc));
+            return;
+        }
+    }
+    LOGI("async: listening to feedback endpoint 0x%02x", f.feedbackEndpoint);
+}
+
+void UsbStreamer::onFeedbackDone(libusb_transfer* t) {
+    auto* self = static_cast<UsbStreamer*>(t->user_data);
+    bool resubmit = false;
+    switch (t->status) {
+        case LIBUSB_TRANSFER_COMPLETED:
+            for (int i = 0; i < t->num_iso_packets; ++i) {
+                const libusb_iso_packet_descriptor& p = t->iso_packet_desc[i];
+                if (p.status != LIBUSB_TRANSFER_COMPLETED || p.actual_length < 3) continue;
+                const uint32_t perUnit = uac::decodeFeedback(libusb_get_iso_packet_buffer(t, unsigned(i)),
+                                                             p.actual_length, self->highSpeed_, self->nominalUnitQ16_,
+                                                             self->feedbackShift_);
+                if (perUnit == 0) continue;
+                self->scheduler_->setFeedback(perUnit * self->unitsPerPacket_);
+                if (!self->feedbackSeen_.exchange(true)) {
+                    LOGI("async feedback: %.4f frames per packet (nominal %.4f, format shift %d)",
+                         perUnit * self->unitsPerPacket_ / 65536.0,
+                         self->nominalUnitQ16_ * self->unitsPerPacket_ / 65536.0, self->feedbackShift_);
+                }
+            }
+            resubmit = self->streaming_;
+            break;
+        case LIBUSB_TRANSFER_NO_DEVICE:
+            self->disconnected_ = true;
+            self->streaming_ = false;
+            break;
+        case LIBUSB_TRANSFER_CANCELLED:
+            break;
+        default:
+            resubmit = self->streaming_;
+            break;
+    }
+    if (resubmit && libusb_submit_transfer(t) == LIBUSB_SUCCESS) return;
+    --self->inFlight_;
+    self->spaceCv_.notify_all();
 }
 
 uint32_t UsbStreamer::packetsPerSecond(const uac::OutputFormat& f) const {
@@ -547,6 +733,7 @@ void UsbStreamer::close() {
 int UsbStreamer::controlFeature(uint8_t request, uint8_t control, uint8_t channel, uint8_t* data, uint16_t length) {
     if (!handle_ || !featureUnit_) return LIBUSB_ERROR_NOT_SUPPORTED;
     const uint8_t type = (request & 0x80) ? kReqInInterface : kReqOutInterface;
+    if (device_.uacVersion == 2 && request == kGetCur) request = kUac2Cur;  // UAC2 GET CUR is 0x01 + IN
     return libusb_control_transfer(handle_, type, request, uint16_t((control << 8) | channel),
                                    uint16_t((featureUnit_->unitId << 8) | device_.controlInterface), data, length,
                                    1000);
@@ -571,6 +758,20 @@ UsbStreamer::VolumeRange UsbStreamer::volumeRange() {
     if (channels.empty()) return r;
     uint8_t buf[2];
     const uint8_t ch = channels[0];
+    if (device_.uacVersion == 2) {
+        // RANGE: wNumSubRanges, then wMIN wMAX wRES (first sub-range is enough, as in Linux).
+        uint8_t range[8] = {};
+        const int rc = libusb_control_transfer(handle_, kReqInInterface, kUac2Range, uint16_t(kVolumeControl << 8 | ch),
+                                               uint16_t((featureUnit_->unitId << 8) | device_.controlInterface),
+                                               range, sizeof range, 1000);
+        if (rc < 8) return r;
+        r.min = le16(range + 2);
+        r.max = le16(range + 4);
+        r.res = le16(range + 6);
+        if (controlFeature(kGetCur, kVolumeControl, ch, buf, 2) == 2) r.cur = le16(buf);
+        r.available = r.max > r.min;
+        return r;
+    }
     if (controlFeature(kGetMin, kVolumeControl, ch, buf, 2) != 2) return r;
     r.min = le16(buf);
     if (controlFeature(kGetMax, kVolumeControl, ch, buf, 2) != 2) return r;

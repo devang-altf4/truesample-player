@@ -51,6 +51,8 @@ interface PlayerActions {
     fun setVolume(db: Float)
     fun openFile()
     fun allowMusic()
+    /** Sends the logs and DAC descriptors through Android's share sheet. */
+    fun shareDiagnostics()
     /** Null while the file header has not been read yet. */
     fun formatOf(track: Track): Result<SourceFormat>?
     /** How the connected DAC will play [format] in the chosen mode; null with no DAC or if it can't. */

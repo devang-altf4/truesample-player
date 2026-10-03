@@ -98,6 +98,46 @@ static std::vector<uint8_t> ghw123pRealDescriptors() {
     };
 }
 
+// UAC2 descriptors shaped like a typical hi-res USB-C dongle: high speed, a
+// programmable clock behind a clock selector, async OUT endpoint with an explicit
+// feedback endpoint, 16-bit and 32-bit alternate settings, and a HID interface.
+static std::vector<uint8_t> uac2DongleFixture() {
+    return {
+        18, 0x01, 0x00, 0x02, 0xEF, 0x02, 0x01, 64, 0x34, 0x12, 0x78, 0x56, 0x00, 0x01, 1, 2, 3, 1,
+        9, 0x02, 0x00, 0x00, 3, 1, 0, 0x80, 50,
+        8, 0x0B, 0, 2, 0x01, 0x00, 0x20, 0,                                     // interface association
+        // interface 0: AudioControl, UAC2
+        9, 0x04, 0, 0, 0, 0x01, 0x01, 0x20, 0,
+        9, 0x24, 0x01, 0x00, 0x02, 0x04, 0x40, 0x00, 0x00,                       // header
+        8, 0x24, 0x0A, 0x29, 0x03, 0x07, 0x00, 0,                                // clock source 0x29, rate settable
+        8, 0x24, 0x0B, 0x28, 1, 0x29, 0x03, 0,                                   // clock selector 0x28 -> 0x29
+        17, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x28, 2, 0x03, 0, 0, 0, 0, 0x00, 0x00, 0,  // IT 1 USB streaming
+        18, 0x24, 0x06, 0x02, 0x01, 0x0F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    // FU 2: master mute+volume
+        12, 0x24, 0x03, 0x03, 0x02, 0x03, 0x00, 0x02, 0x28, 0x00, 0x00, 0,       // OT 3 headphones
+        // interface 1: playback
+        9, 0x04, 1, 0, 0, 0x01, 0x02, 0x20, 0,
+        9, 0x04, 1, 1, 2, 0x01, 0x02, 0x20, 0,
+        16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 2, 0x03, 0, 0, 0, 0,   // AS general: PCM, 2 ch
+        6, 0x24, 0x02, 0x01, 2, 16,                                             // 16-bit in 2 bytes
+        7, 0x05, 0x01, 0x05, 0xC4, 0x00, 1,                                     // EP 0x01 iso async, 196 B
+        8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        7, 0x05, 0x81, 0x11, 0x04, 0x00, 4,                                     // feedback EP 0x81
+        9, 0x04, 1, 2, 2, 0x01, 0x02, 0x20, 0,
+        16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 2, 0x03, 0, 0, 0, 0,
+        6, 0x24, 0x02, 0x01, 4, 32,                                             // 32-bit in 4 bytes
+        7, 0x05, 0x01, 0x05, 0x88, 0x01, 1,                                     // 392 B
+        8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        7, 0x05, 0x81, 0x11, 0x04, 0x00, 4,
+        // interface 2: HID buttons
+        9, 0x04, 2, 0, 1, 0x03, 0x00, 0x00, 0,
+        7, 0x05, 0x83, 0x03, 0x08, 0x00, 4,
+    };
+}
+
+static void put32(std::vector<uint8_t>& v, uint32_t x) {
+    for (int i = 0; i < 4; ++i) v.push_back(uint8_t(x >> (8 * i)));
+}
+
 int main() {
     test("parses the real GHW-123P descriptors", [] {
         auto bytes = ghw123pRealDescriptors();
@@ -162,11 +202,115 @@ int main() {
         }
     });
 
-    test("flags UAC2 devices and does not misparse them", [] {
-        auto bytes = ghw123pFixture(0x20);
+    test("parses a UAC2 dongle: async endpoint, feedback, clocks", [] {
+        auto bytes = uac2DongleFixture();
         uac::UacDevice dev = uac::parseDescriptors(bytes.data(), bytes.size());
         CHECK(dev.uacVersion == 2);
-        CHECK(dev.outputs.empty());
+        CHECK(dev.controlInterface == 0);
+        CHECK(dev.outputs.size() == 2);
+        if (dev.outputs.size() != 2) return;
+        const uac::OutputFormat& a = dev.outputs[0];
+        CHECK(a.interfaceNumber == 1 && a.altSetting == 1);
+        CHECK(a.formatTag == 1);
+        CHECK(a.channels == 2 && a.subslotBytes == 2 && a.bitResolution == 16);
+        CHECK(a.endpointAddress == 0x01 && a.maxPacketBytes == 196 && a.interval == 1);
+        CHECK(a.syncType == uac::SyncType::Async);
+        CHECK(a.feedbackEndpoint == 0x81 && a.feedbackMaxPacket == 4 && a.feedbackInterval == 4);
+        CHECK(a.terminalLink == 1);
+        CHECK(a.clockId == 0x28);
+        CHECK(a.rates.empty());  // UAC2 rates come from the clock at runtime
+        const uac::OutputFormat& b = dev.outputs[1];
+        CHECK(b.subslotBytes == 4 && b.bitResolution == 32 && b.maxPacketBytes == 392);
+        CHECK(b.feedbackEndpoint == 0x81);
+
+        CHECK(dev.clocks.size() == 2);
+        const uac::Clock* src = uac::findClock(dev, 0x29);
+        CHECK(src && src->kind == uac::Clock::Kind::Source && src->frequencyWritable);
+        CHECK(uac::resolveClockSource(dev, 0x28, nullptr) == 0x29);
+        CHECK(uac::resolveClockSource(dev, 0x28, [](uint8_t) { return 1; }) == 0x29);
+        CHECK(uac::resolveClockSource(dev, 0x77, nullptr) == 0);
+
+        const uac::FeatureUnit* fu = uac::findPlaybackFeatureUnit(dev, a);
+        CHECK(fu != nullptr);
+        if (fu) CHECK(fu->unitId == 2 && fu->masterVolume && fu->masterMute);
+    });
+
+    test("UAC2 truncated descriptors never read out of bounds", [] {
+        auto bytes = uac2DongleFixture();
+        for (size_t n = 0; n < bytes.size(); ++n) uac::parseDescriptors(bytes.data(), n);
+        CHECK(true);
+    });
+
+    test("ratesFromRange expands discrete and continuous ranges", [] {
+        std::vector<uint8_t> discrete = {3, 0};
+        for (uint32_t r : {44100u, 48000u, 96000u}) {
+            put32(discrete, r);
+            put32(discrete, r);
+            put32(discrete, 0);
+        }
+        CHECK((uac::ratesFromRange(discrete.data(), discrete.size()) == std::vector<uint32_t>{44100, 48000, 96000}));
+
+        std::vector<uint8_t> continuous = {1, 0};
+        put32(continuous, 8000);
+        put32(continuous, 192000);
+        put32(continuous, 1);
+        CHECK((uac::ratesFromRange(continuous.data(), continuous.size()) ==
+               std::vector<uint32_t>{32000, 44100, 48000, 88200, 96000, 176400, 192000}));
+
+        std::vector<uint8_t> truncated = {2, 0, 1, 2, 3};
+        CHECK(uac::ratesFromRange(truncated.data(), truncated.size()).empty());
+    });
+
+    test("decodeFeedback handles 16.16, 10.14 and mislabelled devices", [] {
+        // High speed, 44.1 kHz: 5.5125 frames per microframe.
+        const uint32_t nominalHs = uint32_t((uint64_t(44100) << 16) / 8000);
+        int shift = uac::kUnknownShift;
+        std::vector<uint8_t> v;
+        put32(v, nominalHs + 30);  // DAC clock a hair fast
+        CHECK(uac::decodeFeedback(v.data(), 4, true, nominalHs, shift) == nominalHs + 30);
+        CHECK(shift == 0);
+
+        // A high-speed device that sends 10.14 (seen in the wild): detected as a shift of 2.
+        shift = uac::kUnknownShift;
+        v.clear();
+        put32(v, uint32_t(5.5125 * 16384));
+        const uint32_t got = uac::decodeFeedback(v.data(), 4, true, nominalHs, shift);
+        CHECK(shift == 2);
+        CHECK(got > nominalHs - 16 && got < nominalHs + 16);
+        CHECK(uac::decodeFeedback(v.data(), 4, true, nominalHs, shift) == got);  // shift is remembered
+
+        // Full speed, 3-byte 10.14: 44.1 frames per ms.
+        const uint32_t nominalFs = uint32_t((uint64_t(44100) << 16) / 1000);
+        shift = uac::kUnknownShift;
+        const uint32_t q1014 = uint32_t(44.1 * 16384);
+        const uint8_t fs[3] = {uint8_t(q1014), uint8_t(q1014 >> 8), uint8_t(q1014 >> 16)};
+        const uint32_t fsGot = uac::decodeFeedback(fs, 3, false, nominalFs, shift);
+        CHECK(fsGot > nominalFs - 16 && fsGot < nominalFs + 16);
+
+        // Zero (clock not locked) and far-off values are ignored.
+        shift = uac::kUnknownShift;
+        const uint8_t zero[4] = {0, 0, 0, 0};
+        CHECK(uac::decodeFeedback(zero, 4, true, nominalHs, shift) == 0);
+        CHECK(shift == uac::kUnknownShift);
+        shift = 0;
+        v.clear();
+        put32(v, nominalHs * 3 / 2);
+        CHECK(uac::decodeFeedback(v.data(), 4, true, nominalHs, shift) == 0);
+    });
+
+    test("packet scheduler follows DAC feedback and respects the cap", [] {
+        uac::PacketScheduler s(44100, 8000, 7);
+        uint32_t total = 0;
+        for (int i = 0; i < 8000; ++i) total += s.next();
+        CHECK(total == 44100);  // nominal: exact
+
+        s.setFeedback(s.nominalQ16() + 6554);  // DAC wants 0.1 frame more per microframe
+        total = 0;
+        for (int i = 0; i < 8000; ++i) total += s.next();
+        CHECK(total >= 44100 + 790 && total <= 44100 + 810);
+
+        s.setFeedback(uint32_t(20) << 16);  // absurd feedback is clamped to what the endpoint carries
+        CHECK(s.next() == 7);
     });
 
     test("truncated descriptors never read out of bounds", [] {

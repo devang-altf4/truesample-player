@@ -5,12 +5,16 @@ import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
 
-/** Decodes FLAC or WAV to interleaved int32 left-justified PCM. */
+/** Decodes audio files (FLAC/WAV natively, everything else via FFmpeg) to interleaved int32 left-justified PCM. */
 class AudioDecoder private constructor(private var handle: Long) : Closeable {
     val sampleRate: Int
     val channels: Int
     val bitsPerSample: Int
     val totalFrames: Long
+    /** True for lossy codecs (MP3, AAC, Vorbis, Opus) and DSD, which decode to floating point. */
+    val lossy: Boolean
+    /** FFmpeg's codec name, e.g. "flac", "mp3", "alac". */
+    val codec: String
 
     init {
         val info = nativeInfo(handle)
@@ -18,6 +22,8 @@ class AudioDecoder private constructor(private var handle: Long) : Closeable {
         channels = info[1].toInt()
         bitsPerSample = info[2].toInt()
         totalFrames = info[3]
+        lossy = info[4] != 0L
+        codec = nativeCodec(handle)
     }
 
     /** Decodes up to [maxFrames] frames into the direct [buffer]; returns 0 at the end of the file. */
@@ -41,12 +47,13 @@ class AudioDecoder private constructor(private var handle: Long) : Closeable {
         /** Takes ownership of [pfd]. */
         fun open(pfd: ParcelFileDescriptor): AudioDecoder {
             val handle = nativeOpen(pfd.detachFd())
-            if (handle == 0L) throw IOException("Not a FLAC or WAV file")
+            if (handle == 0L) throw IOException("This file can't be decoded")
             return AudioDecoder(handle)
         }
 
         @JvmStatic private external fun nativeOpen(fd: Int): Long
         @JvmStatic private external fun nativeInfo(handle: Long): LongArray
+        @JvmStatic private external fun nativeCodec(handle: Long): String
         @JvmStatic private external fun nativeRead(handle: Long, buffer: ByteBuffer, maxFrames: Int): Int
         @JvmStatic private external fun nativeSeek(handle: Long, frame: Long): Boolean
         @JvmStatic private external fun nativeClose(handle: Long)

@@ -19,11 +19,18 @@ data class Track(
 }
 
 /** What the file actually contains, read from its header. */
-data class SourceFormat(val sampleRate: Int, val bitsPerSample: Int, val channels: Int, val totalFrames: Long) {
+data class SourceFormat(
+    val sampleRate: Int,
+    val bitsPerSample: Int,
+    val channels: Int,
+    val totalFrames: Long,
+    /** Lossy codecs (and DSD) decode to floating point, so "bits" is not meaningful for them. */
+    val lossy: Boolean = false,
+) {
     val durationMs: Long get() = if (sampleRate > 0) totalFrames * 1000 / sampleRate else 0
 }
 
-/** Finds the FLAC/WAV files on the phone and reads their real formats in the background. */
+/** Finds the music on the phone and reads each file's real format in the background. */
 class MusicLibrary(private val context: Context) {
 
     private val probeExecutor = Executors.newSingleThreadExecutor()
@@ -58,7 +65,9 @@ class MusicLibrary(private val context: Context) {
 
     fun readFormat(uri: Uri): SourceFormat {
         val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: error("cannot open")
-        return AudioDecoder.open(pfd).use { SourceFormat(it.sampleRate, it.bitsPerSample, it.channels, it.totalFrames) }
+        return AudioDecoder.open(pfd).use {
+            SourceFormat(it.sampleRate, it.bitsPerSample, it.channels, it.totalFrames, it.lossy)
+        }
     }
 
     fun shutdown() = probeExecutor.shutdownNow()
@@ -72,8 +81,8 @@ class MusicLibrary(private val context: Context) {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DISPLAY_NAME,
         )
-        val mimes = MIME_TYPES.joinToString(",") { "'$it'" }
-        val selection = "${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes)" +
+        // Everything Android marks as music, plus hi-fi formats it may not recognise.
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0" +
             EXTENSIONS.joinToString("") { " OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE '%.$it'" }
         val tracks = mutableListOf<Track>()
         context.contentResolver.query(collection, projection, selection, null, null)?.use { c ->
@@ -93,7 +102,10 @@ class MusicLibrary(private val context: Context) {
     }
 
     companion object {
-        private val EXTENSIONS = listOf("flac", "wav")
-        private val MIME_TYPES = listOf("audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave")
+        /** Formats the decoder handles (FFmpeg plus dr_flac/dr_wav). */
+        private val EXTENSIONS = listOf(
+            "flac", "wav", "w64", "aif", "aiff", "aifc", "caf", "m4a", "alac", "mp4", "aac", "mp3", "mp2",
+            "ogg", "oga", "opus", "mka", "ape", "wv", "tak", "dsf", "dff",
+        )
     }
 }

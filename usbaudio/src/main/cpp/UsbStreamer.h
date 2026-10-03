@@ -92,6 +92,11 @@ public:
 
 private:
     static void onTransferDone(libusb_transfer* transfer);
+    static void onFeedbackDone(libusb_transfer* transfer);
+    void startFeedback(const uac::OutputFormat& format, uint32_t rate, uint32_t packetsPerSecond);
+    void loadUac2Rates();
+    std::vector<uint32_t> readClockRates(uint8_t clockSource);
+    bool setUac2Rate(size_t outputIndex, uint32_t rate, uint32_t& deviceRate, std::string& error);
     void fillTransfer(libusb_transfer* transfer);
     bool push(const int32_t* interleaved, size_t frames);  // dither, pack, queue for USB
     bool resampleAndPush(size_t frames, bool endOfInput);  // frames already in resampleIn_
@@ -105,6 +110,14 @@ private:
     libusb_device_handle* handle_ = nullptr;
     uac::UacDevice device_;
     const uac::FeatureUnit* featureUnit_ = nullptr;
+    std::vector<uint8_t> clockSources_;  // UAC2: clock source per output format
+    bool highSpeed_ = false;
+
+    // Async feedback (touched only on the libusb event thread once streaming)
+    uint32_t unitsPerPacket_ = 1;
+    uint32_t nominalUnitQ16_ = 0;
+    int feedbackShift_ = 0;
+    std::atomic<bool> feedbackSeen_{false};
     std::vector<std::pair<uint8_t, int16_t>> savedVolume_;  // DAC's own volume per channel, restored on close
     int savedMute_ = -1;
     VolumeRange rangeCache_;  // min/max/res never change, so read them once

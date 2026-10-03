@@ -21,3 +21,11 @@ captures/
 .idea/
 *.iml
 .DS_Store
+
+# Release signing: keep the key and its passwords out of git
+keystore.properties
+*.jks
+*.keystore
+
+# FFmpeg build output: regenerate with scripts/build-ffmpeg.sh
+third_party/ffmpeg/android/

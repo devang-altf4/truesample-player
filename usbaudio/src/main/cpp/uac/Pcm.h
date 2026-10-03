@@ -11,27 +11,43 @@
 
 namespace uac {
 
-// Frames to put in each isochronous packet of a synchronous/adaptive endpoint.
+// Frames to put in each isochronous packet. For synchronous/adaptive endpoints:
 // 48000 Hz at 1000 packets/s gives 48 every time; 44100 Hz gives nine packets
-// of 44 then one of 45, so the long-run rate is exact.
+// of 44 then one of 45, so the long-run rate is exact. For asynchronous endpoints
+// the DAC's measured rate (from its feedback endpoint) takes over once known.
 class PacketScheduler {
 public:
-    PacketScheduler(uint32_t sampleRate, uint32_t packetsPerSecond)
-        : rate_(sampleRate), pps_(packetsPerSecond) {}
+    // maxFramesCap: never put more frames in a packet than the endpoint can carry (0 = no cap).
+    PacketScheduler(uint32_t sampleRate, uint32_t packetsPerSecond, uint32_t maxFramesCap = 0)
+        : rate_(sampleRate), pps_(packetsPerSecond), cap_(maxFramesCap) {}
 
     uint32_t next() {
-        acc_ += rate_;
-        const uint32_t frames = acc_ / pps_;
-        acc_ -= frames * pps_;
-        return frames;
+        uint32_t frames;
+        if (feedbackQ16_ != 0) {
+            feedbackAcc_ += feedbackQ16_;
+            frames = uint32_t(feedbackAcc_ >> 16);
+            feedbackAcc_ &= 0xFFFF;
+        } else {
+            acc_ += rate_;
+            frames = acc_ / pps_;
+            acc_ -= frames * pps_;
+        }
+        return cap_ ? std::min(frames, cap_) : frames;
     }
 
+    // The DAC's measured rate in frames per packet, 16.16 fixed point (0 = use the nominal rate).
+    void setFeedback(uint32_t framesPerPacketQ16) { feedbackQ16_ = framesPerPacketQ16; }
+
+    uint32_t nominalQ16() const { return uint32_t((uint64_t(rate_) << 16) / pps_); }
     uint32_t maxFrames() const { return (rate_ + pps_ - 1) / pps_; }
 
 private:
     uint32_t rate_;
     uint32_t pps_;
+    uint32_t cap_;
     uint32_t acc_ = 0;
+    uint32_t feedbackQ16_ = 0;
+    uint64_t feedbackAcc_ = 0;
 };
 
 // Picks the DAC rate to play `sourceRate` at, from the rates the DAC supports:
