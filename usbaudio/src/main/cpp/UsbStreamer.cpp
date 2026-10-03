@@ -112,29 +112,31 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         return (speed >= LIBUSB_SPEED_HIGH ? 8000u : 1000u) >> std::min<uint32_t>(shift, 3);
     };
 
-    // Pick the smallest format that holds the source losslessly.
+    // Prefer the smallest format that holds the source losslessly; otherwise the
+    // deepest one available, with dither.
     int best = -1;
+    int deepest = -1;
     bool rateOk = false, channelsOk = false;
     for (size_t i = 0; i < device_.outputs.size(); ++i) {
         const uac::OutputFormat& f = device_.outputs[i];
         if (f.formatTag != 1 || f.channels != channels) continue;
         channelsOk = true;
         if (!f.supportsRate(sampleRate)) continue;
-        rateOk = true;
         const uint32_t maxFrames = uac::PacketScheduler(sampleRate, packetsPerSecond(f)).maxFrames();
         if (maxFrames * f.frameBytes() > f.maxPacketBytes) continue;
+        rateOk = true;
+        if (deepest < 0 || f.bitResolution > device_.outputs[deepest].bitResolution) deepest = int(i);
         if (f.bitResolution < sourceBits) continue;
         if (best < 0 || f.subslotBytes < device_.outputs[best].subslotBytes) best = int(i);
     }
+    const bool lossless = best >= 0;
+    if (!lossless) best = deepest;
     if (best < 0) {
         char msg[160];
         if (!channelsOk) {
             std::snprintf(msg, sizeof msg, "The DAC has no %u-channel output.", channels);
-        } else if (!rateOk) {
-            std::snprintf(msg, sizeof msg, "The DAC cannot play %u Hz (no resampling in milestone 1).", sampleRate);
         } else {
-            std::snprintf(msg, sizeof msg, "The DAC cannot play %u-bit audio at %u Hz without losing bits.",
-                          sourceBits, sampleRate);
+            std::snprintf(msg, sizeof msg, "The DAC cannot play %u Hz (resampling is not built yet).", sampleRate);
         }
         error = msg;
         return false;
@@ -176,6 +178,12 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     packetsPerTransfer_ = std::max<uint32_t>(1, pps * kTransferMillis / 1000);
     ring_ = std::make_unique<uac::RingBuffer>(size_t(sampleRate) * frameBytes_ * kRingMillis / 1000);
     packBuffer_.resize(size_t(sampleRate / 100) * frameBytes_);  // 10 ms per pack step
+    if (lossless) {
+        ditherer_.reset();
+    } else {
+        ditherer_ = std::make_unique<uac::Ditherer>(f.bitResolution);
+        ditherBuffer_.resize(size_t(sampleRate / 100) * f.channels);
+    }
 
     const size_t transferBytes = size_t(packetsPerTransfer_) * scheduler_->maxFrames() * frameBytes_;
     transferBuffers_.assign(kTransfersInFlight, std::vector<uint8_t>(transferBytes));
@@ -208,9 +216,10 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     info.deviceRate = deviceRate;
     info.subslotBytes = f.subslotBytes;
     info.bitResolution = f.bitResolution;
-    info.bitPerfect = true;  // format selection above refuses anything lossy
-    LOGI("streaming %u Hz, %u-bit source -> alt %u (%u-bit in %u-byte slots), %u packets/s, %u packets/transfer",
-         sampleRate, sourceBits, f.altSetting, f.bitResolution, f.subslotBytes, pps, packetsPerTransfer_);
+    info.bitPerfect = lossless;
+    LOGI("streaming %u Hz, %u-bit source -> alt %u (%u-bit in %u-byte slots%s), %u packets/s, %u packets/transfer",
+         sampleRate, sourceBits, f.altSetting, f.bitResolution, f.subslotBytes, lossless ? "" : ", dithered", pps,
+         packetsPerTransfer_);
     return true;
 }
 
@@ -276,7 +285,12 @@ long UsbStreamer::write(const int32_t* pcm, size_t frames) {
     size_t done = 0;
     while (done < frames) {
         const size_t n = std::min(chunkFrames, frames - done);
-        uac::packSamples(pcm + done * channels, packBuffer_.data(), n * channels, sourceSubslot_);
+        const int32_t* src = pcm + done * channels;
+        if (ditherer_) {
+            ditherer_->process(src, ditherBuffer_.data(), n * channels);
+            src = ditherBuffer_.data();
+        }
+        uac::packSamples(src, packBuffer_.data(), n * channels, sourceSubslot_);
         const uint8_t* p = packBuffer_.data();
         size_t left = n * frameBytes_;
         while (left > 0) {

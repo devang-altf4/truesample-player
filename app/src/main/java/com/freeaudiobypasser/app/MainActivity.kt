@@ -25,6 +25,7 @@ import androidx.core.content.IntentCompat
 import com.freeaudiobypasser.usbaudio.UsbAudioException
 import com.freeaudiobypasser.usbaudio.UsbAudioOutput
 import com.freeaudiobypasser.usbaudio.VolumeRange
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
@@ -33,6 +34,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var usbManager: UsbManager
     private lateinit var dacText: TextView
+    private lateinit var connectButton: Button
     private lateinit var fileText: TextView
     private lateinit var statusText: TextView
     private lateinit var positionText: TextView
@@ -99,7 +101,17 @@ class MainActivity : ComponentActivity() {
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
 
-        findViewById<Button>(R.id.connectButton).setOnClickListener { connectDac() }
+        connectButton = findViewById(R.id.connectButton)
+        connectButton.setOnClickListener {
+            if (output == null) {
+                connectDac()
+            } else {
+                stopPlayback()
+                closeDac()
+                statusText.text = "Stopped"
+                log("Released the DAC back to Android.")
+            }
+        }
         findViewById<Button>(R.id.chooseButton).setOnClickListener {
             pickFile.launch(arrayOf("audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/*"))
         }
@@ -135,6 +147,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshDacLabel() {
         val connected = output
+        connectButton.text = if (connected == null) "Connect DAC" else "Disconnect (give DAC back to Android)"
         dacText.text = when {
             connected != null -> "DAC: ${connected.device.productName} — under our control"
             findDac() != null -> "DAC found: ${findDac()?.productName} (tap Connect)"
@@ -160,6 +173,8 @@ class MainActivity : ComponentActivity() {
             output = out
             val hex = out.rawDescriptors.joinToString(" ") { "%02x".format(it) }
             Log.i(TAG, "RAW_DESCRIPTORS $hex")
+            File(filesDir, "dac-descriptors-%04x-%04x.bin".format(device.vendorId, device.productId))
+                .writeBytes(out.rawDescriptors)
             log("Took control of ${device.productName} (VID %04x PID %04x)".format(device.vendorId, device.productId))
             log(out.description.trimEnd())
             log("Raw descriptors (${out.rawDescriptors.size} bytes):\n" + hexDump(out.rawDescriptors))
@@ -230,8 +245,12 @@ class MainActivity : ComponentActivity() {
             val pfd = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("file vanished")
             AudioDecoder.open(pfd).use { dec ->
                 val info = out.start(dec.sampleRate, dec.bitsPerSample, dec.channels)
-                val label = "${info.sampleRate} Hz · ${info.bitsPerSample}-bit → USB direct · " +
-                    if (info.bitPerfect) "BIT-PERFECT ✓" else "converted"
+                val label = if (info.bitPerfect) {
+                    "${info.sampleRate} Hz · ${info.bitsPerSample}-bit → USB direct · BIT-PERFECT ✓"
+                } else {
+                    "${info.sampleRate} Hz · ${info.bitsPerSample}→${info.format.bitResolution}-bit dithered " +
+                        "(DAC limit) → USB direct"
+                }
                 ui {
                     statusText.text = label
                     log("Playing via alt setting ${info.format.altSetting}: ${info.format.bitResolution}-bit in " +

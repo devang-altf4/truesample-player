@@ -1,6 +1,7 @@
 // Unit tests for the pure C++ UAC core. Built with the NDK and run on the phone
 // by scripts/run-native-tests.sh (no host compiler needed).
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <vector>
@@ -161,6 +162,31 @@ int main() {
         uint8_t out4[8];
         uac::packSamples(src, out4, 2, 4);
         CHECK(std::memcmp(out4, src, 8) == 0);
+    });
+
+    test("ditherer reduces 24-bit to 16-bit without bias or overflow", [] {
+        uac::Ditherer d(16);
+        const int n = 100000;
+        std::vector<int32_t> in(n, 0x12345600), out(n);
+        d.process(in.data(), out.data(), n);
+        bool aligned = true, close = true;
+        double sum = 0;
+        for (int i = 0; i < n; ++i) {
+            aligned &= (out[i] & 0xFFFF) == 0;
+            close &= std::abs(int64_t(out[i]) - in[i]) <= 0x18000;  // round + dither <= 1.5 LSB
+            sum += double(out[i]) - in[i];
+        }
+        CHECK(aligned);
+        CHECK(close);
+        CHECK(std::abs(sum / n) < 0x10000 * 0.02);  // mean error under 2% of an LSB
+
+        const int32_t extremes[2] = {INT32_MAX, INT32_MIN};
+        int32_t clipped[2];
+        for (int i = 0; i < 1000; ++i) {
+            d.process(extremes, clipped, 2);
+            CHECK(clipped[0] == 0x7FFF0000);
+            CHECK(clipped[1] >= INT32_MIN && clipped[1] <= int32_t(0x80010000));
+        }
     });
 
     test("ring buffer wraps around and preserves bytes", [] {

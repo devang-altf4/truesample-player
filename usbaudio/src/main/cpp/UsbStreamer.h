@@ -79,6 +79,8 @@ private:
     std::vector<libusb_transfer*> transfers_;
     std::vector<std::vector<uint8_t>> transferBuffers_;
     std::vector<uint8_t> packBuffer_;
+    std::unique_ptr<uac::Ditherer> ditherer_;  // set only when the DAC has fewer bits than the source
+    std::vector<int32_t> ditherBuffer_;
     uint32_t packetsPerTransfer_ = 0;
     uint32_t frameBytes_ = 0;
     uint32_t sourceSubslot_ = 0;

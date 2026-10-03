@@ -51,6 +51,36 @@ inline void packSamples(const int32_t* src, uint8_t* dst, size_t samples, uint32
     }
 }
 
+// Reduces left-justified int32 samples to `bits` significant bits with TPDF
+// dither (±1 LSB triangular), for DACs that cannot take the source bit depth.
+class Ditherer {
+public:
+    explicit Ditherer(uint32_t bits) : shift_(32 - bits) {}
+
+    void process(const int32_t* src, int32_t* dst, size_t samples) {
+        const int64_t lsb = int64_t(1) << shift_;
+        const int64_t mask = lsb - 1;
+        const int64_t maxValue = int64_t(INT32_MAX) & ~mask;
+        for (size_t i = 0; i < samples; ++i) {
+            const int64_t dither = int64_t(nextRandom() & mask) - int64_t(nextRandom() & mask);
+            int64_t v = (int64_t(src[i]) + dither + lsb / 2) & ~mask;  // round to the nearest step
+            v = std::clamp<int64_t>(v, INT32_MIN, maxValue);
+            dst[i] = int32_t(v);
+        }
+    }
+
+private:
+    uint32_t nextRandom() {  // xorshift32
+        state_ ^= state_ << 13;
+        state_ ^= state_ >> 17;
+        state_ ^= state_ << 5;
+        return state_;
+    }
+
+    uint32_t shift_;
+    uint32_t state_ = 0x9E3779B9u;
+};
+
 // Single-producer single-consumer byte ring. Capacity is rounded up to a power of two.
 class RingBuffer {
 public:

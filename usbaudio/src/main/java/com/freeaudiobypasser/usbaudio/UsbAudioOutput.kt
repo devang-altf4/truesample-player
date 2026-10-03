@@ -75,7 +75,11 @@ class UsbAudioOutput private constructor(
             if (r[0] == 0) null else VolumeRange(r[1] / 256f, r[2] / 256f, r[3] / 256f, r[4] / 256f)
         }
 
-    /** Selects the matching DAC mode and starts streaming silence until [write] supplies audio. */
+    /**
+     * Selects the matching DAC mode and starts streaming silence until [write] supplies audio.
+     * If the DAC has fewer bits than [bitsPerSample], audio is reduced with TPDF dither and
+     * [StreamInfo.bitPerfect] is false. Throws [UsbAudioException] if the DAC cannot play the rate.
+     */
     fun start(sampleRate: Int, bitsPerSample: Int, channels: Int): StreamInfo = synchronized(lock) {
         checkOpen()
         val r = NativeBridge.nativeStart(handle, sampleRate, bitsPerSample, channels)
