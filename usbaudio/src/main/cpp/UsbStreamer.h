@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "uac/Equalizer.h"
 #include "uac/Pcm.h"
 #include "uac/UacDescriptors.h"
 
@@ -86,6 +87,11 @@ public:
     void stop();
     void close();
 
+    // Equalizer, applied after any resampling. An empty band list with 0 dB preamp turns it off.
+    // Safe to call from any thread; takes effect at the next written chunk.
+    void setEqualizer(const std::vector<uac::EqBand>& bands, double preampDb);
+    bool equalizerActive() const;
+
     VolumeRange volumeRange();
     bool setVolume(int16_t value256);
     Stats stats() const;
@@ -98,7 +104,8 @@ private:
     std::vector<uint32_t> readClockRates(uint8_t clockSource);
     bool setUac2Rate(size_t outputIndex, uint32_t rate, uint32_t& deviceRate, std::string& error);
     void fillTransfer(libusb_transfer* transfer);
-    bool push(const int32_t* interleaved, size_t frames);  // dither, pack, queue for USB
+    bool push(const int32_t* interleaved, size_t frames, bool dither);  // dither, pack, queue for USB
+    void applyPendingEqualizer();
     bool resampleAndPush(size_t frames, bool endOfInput);  // frames already in resampleIn_
     void eventLoop();
     uint32_t packetsPerSecond(const uac::OutputFormat& format) const;
@@ -141,6 +148,16 @@ private:
     std::vector<float> resampleIn_;
     std::vector<float> resampleOut_;
     std::vector<int32_t> resampledInt_;
+    uint32_t outputRate_ = 0;
+    bool ditherIntegerPath_ = false;
+
+    // Equalizer: settings written by any thread, filters owned by the writing thread.
+    uac::Equalizer eq_;
+    std::mutex eqMutex_;
+    std::vector<uac::EqBand> eqBands_;
+    double eqPreampDb_ = 0;
+    std::atomic<bool> eqDirty_{false};
+    std::atomic<bool> eqActiveFlag_{false};
 
     std::thread eventThread_;
     std::atomic<bool> eventThreadRun_{false};

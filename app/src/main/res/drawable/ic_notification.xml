@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar icon: the sampled-waveform logo, simplified for 24 dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M2,12 L22,12"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1" />
+    <path
+        android:pathData="M4,12 L4,9.5 M8,12 L8,5.5 M12,12 L12,8 M16,12 L16,16.5 M20,12 L20,19"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="1.6" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M2.4,9.5a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0M6.4,5.5a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0M10.4,8a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0M14.4,16.5a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0M18.4,19a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0" />
+</vector>

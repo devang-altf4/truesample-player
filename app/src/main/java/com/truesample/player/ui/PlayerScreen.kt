@@ -1,5 +1,6 @@
 package com.truesample.player.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -24,24 +25,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -55,22 +49,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.truesample.player.DacStatus
+import com.truesample.player.LibraryTab
 import com.truesample.player.PlayerActions
 import com.truesample.player.PlayerState
 import com.truesample.player.Progress
 import com.truesample.player.SourceFormat
-import com.truesample.player.Track
 import com.truesample.player.VolumeState
 import com.truesample.player.formatDuration
 import com.truesample.player.khz
@@ -80,12 +71,12 @@ import java.util.Locale
 
 @Composable
 fun PlayerScreen(state: PlayerState, actions: PlayerActions) {
-    var showLog by remember { mutableStateOf(false) }
-    val query = state.query.trim()
-    val visibleTracks = remember(state.tracks, query) {
-        if (query.isEmpty()) state.tracks
-        else state.tracks.filter { it.title.contains(query, true) || it.artist?.contains(query, true) == true }
+    if (state.showEqualizer) {
+        EqualizerScreen(state, actions)
+        return
     }
+    BackHandler(enabled = state.openAlbum != null) { state.openAlbum = null }
+    var showLog by remember { mutableStateOf(false) }
     val dacInUse = state.dac is DacStatus.InUse
 
     LazyColumn(
@@ -95,51 +86,32 @@ fun PlayerScreen(state: PlayerState, actions: PlayerActions) {
             .windowInsetsPadding(WindowInsets.safeDrawing),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        item { Header(onShowLog = { showLog = true }) }
+        item { Header(eqOn = state.eq.isOn, onShowEq = { state.showEqualizer = true }, onShowLog = { showLog = true }) }
         item { DacRow(state.dac, actions::toggleDac) }
         if (dacInUse && state.modes.isNotEmpty()) {
             item { ModePicker(state.modes, state.chosenMode, actions::chooseMode) }
         }
         item { NowPlaying(state, actions) }
-        item { LibraryHeader(state.tracks.size, actions::openFile) }
-        if (state.tracks.size > 6) {
-            item { SearchField(state.query) { state.query = it } }
-        }
-        if (!state.musicPermission) {
-            item { PermissionCard(actions::allowMusic) }
-        } else if (state.tracks.isEmpty()) {
-            item {
-                Text(
-                    "No music on this phone yet. Copy some over, or use Open file.",
-                    style = HifiType.Caption,
-                    modifier = Modifier.padding(vertical = 12.dp),
-                )
-            }
-        }
-        items(visibleTracks, key = { it.uri.toString() }) { track ->
-            val tag = formatTag(track, state, actions)
-            TrackRow(
-                track = track,
-                subtitle = trackSubtitle(track, actions),
-                tag = tag,
-                selected = track == state.selected,
-                playing = state.isPlaying && track == state.selected,
-                onClick = { actions.select(track) },
-            )
-        }
+        libraryItems(state, actions)
         item { Spacer(Modifier.height(24.dp)) }
     }
 
     if (showLog) LogDialog(state.log, onShare = actions::shareDiagnostics) { showLog = false }
+    if (state.showSources) SourcesDialog(state, actions)
 }
 
 // ---- Header and DAC ------------------------------------------------------------------------
 
 @Composable
-private fun Header(onShowLog: () -> Unit) {
+private fun Header(eqOn: Boolean, onShowEq: () -> Unit, onShowLog: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("TRUESAMPLE PLAYER", style = HifiType.Brand)
         Spacer(Modifier.weight(1f))
+        TextButton(onClick = onShowEq) {
+            Lamp(if (eqOn) Hifi.Amber else Hifi.Label.copy(alpha = 0.4f), size = 6.dp, glow = eqOn)
+            Spacer(Modifier.width(6.dp))
+            Text("EQ", style = HifiType.Engraved.copy(color = if (eqOn) Hifi.Amber else Hifi.Label))
+        }
         TextButton(onClick = onShowLog) { Text("LOG", style = HifiType.Engraved) }
     }
 }
@@ -187,25 +159,6 @@ private fun DacRow(dac: DacStatus, onToggle: () -> Unit) {
     }
 }
 
-/** An indicator lamp; [glow] adds the halo of a lit bulb. */
-@Composable
-private fun Lamp(color: Color, size: Dp = 9.dp, glow: Boolean = true) {
-    Box(
-        Modifier
-            .size(size)
-            .drawBehind {
-                val r = this.size.minDimension
-                if (glow) {
-                    drawCircle(
-                        Brush.radialGradient(listOf(color.copy(alpha = 0.5f), Color.Transparent), center, r * 1.7f),
-                        radius = r * 1.7f,
-                    )
-                }
-                drawCircle(color, radius = r / 2)
-            },
-    )
-}
-
 // ---- Output mode ---------------------------------------------------------------------------
 
 private fun modeLabel(m: OutputMode): String =
@@ -237,11 +190,7 @@ private fun ModePicker(modes: List<OutputMode>, chosen: OutputMode?, onChoose: (
                 Spacer(Modifier.weight(1f))
                 Icon(Icons.Filled.ArrowDropDown, contentDescription = "Choose output mode", tint = Hifi.Label)
             }
-            DropdownMenu(
-                expanded = open,
-                onDismissRequest = { open = false },
-                containerColor = Hifi.Panel,
-            ) {
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = Hifi.Panel) {
                 DropdownMenuItem(
                     text = {
                         Column {
@@ -295,72 +244,99 @@ private fun NowPlaying(state: PlayerState, actions: PlayerActions) {
             .border(1.dp, Hifi.Hairline, shape)
             .padding(16.dp),
     ) {
-        Text(if (state.isPlaying) "NOW PLAYING" else "SELECTED", style = HifiType.Engraved)
-        val track = state.selected
+        val track = state.selected ?: state.current
+        val loaded = track != null && state.current?.uri == track.uri
+        Text(
+            when {
+                state.isPlaying && loaded -> "NOW PLAYING"
+                loaded -> "PAUSED"
+                else -> "SELECTED"
+            },
+            style = HifiType.Engraved,
+        )
         if (track == null) {
             Spacer(Modifier.height(8.dp))
             Text("Choose a song from your library below.", style = HifiType.Body.copy(color = Hifi.Label))
             return@Column
         }
-        Spacer(Modifier.height(6.dp))
-        Text(track.title, style = HifiType.Title.copy(color = Hifi.Ink), maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Text(track.artist ?: track.fileName, style = HifiType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Cover(track, actions, size = 84.dp, requestPx = 720)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(track.title, style = HifiType.Title.copy(color = Hifi.Ink), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(track.artist ?: track.fileName, style = HifiType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                track.album?.let {
+                    Text(it, style = HifiType.Caption.copy(color = Hifi.Label.copy(alpha = 0.8f)), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
 
         // Reading formatsVersion re-runs this once the file's header has been parsed.
         val format = state.formatsVersion.let { actions.formatOf(track)?.getOrNull() }
         val dacInUse = state.dac is DacStatus.InUse
         val plan = if (format != null && dacInUse) actions.planFor(format) else null
+        val eqOn = state.eq.isOn
 
         Spacer(Modifier.height(14.dp))
-        SignalPath(format, plan, track.codec)
+        SignalPath(format, plan, track.codec, eqOn)
         Spacer(Modifier.height(12.dp))
-        Verdict(format, plan, dacInUse, state.chosenMode, track.codec)
+        Verdict(format, plan, dacInUse, state.chosenMode, track.codec, eqOn)
         state.notice?.let {
             Spacer(Modifier.height(6.dp))
             Text(it, style = HifiType.Caption.copy(color = Hifi.Amber))
         }
         val progress = state.progress
-        if (state.isPlaying && progress != null) ProgressBar(progress)
-        Spacer(Modifier.height(16.dp))
-        PlayButton(state.isPlaying, actions::togglePlay)
+        if (loaded && progress != null && progress.durationMs > 0) SeekBar(progress, actions::seekTo)
+        Spacer(Modifier.height(12.dp))
+        TransportRow(
+            playing = state.isPlaying && loaded,
+            canSkip = loaded,
+            hasNext = state.hasNext && loaded,
+            onPrevious = actions::previous,
+            onPlayPause = actions::togglePlay,
+            onNext = actions::next,
+        )
         if (dacInUse) VolumeRow(state.volume, actions::setVolume)
     }
 }
-
-/** "24/48" for lossless files; "MP3 44.1" for lossy ones, where a bit depth means nothing. */
-private fun sourceLabel(format: SourceFormat, codec: String, separator: String = "/"): String =
-    if (format.lossy) "$codec$separator${khz(format.sampleRate)}" else "${format.bitsPerSample}/${khz(format.sampleRate)}"
 
 private enum class StageLamp { OFF, PASS, ALTER }
 
 private data class Stage(val label: String, val value: String, val lamp: StageLamp)
 
 /**
- * The signature element: the four places audio could be changed on its way to the DAC,
+ * The signature element: the places audio could be changed on its way to the DAC,
  * each lit green when the audio passes untouched and amber when it is altered.
  */
 @Composable
-private fun SignalPath(format: SourceFormat?, plan: PlaybackPlan?, codec: String) {
+private fun SignalPath(format: SourceFormat?, plan: PlaybackPlan?, codec: String, eqOn: Boolean) {
     val off = { label: String -> Stage(label, "—", StageLamp.OFF) }
     val stages = if (format == null || plan == null) {
         listOf(
             format?.let { Stage("SOURCE", sourceLabel(it, codec), StageLamp.PASS) } ?: off("SOURCE"),
-            off("RATE"), off("DEPTH"), off("DAC"),
+            off("RATE"), off("DSP"), off("DAC"),
         )
     } else {
+        val reduced = plan.dacBits < format.bitsPerSample
         listOf(
             Stage("SOURCE", sourceLabel(format, codec), StageLamp.PASS),
             if (plan.resampled) Stage("RATE", "${khz(format.sampleRate)}→${khz(plan.outputRate)}", StageLamp.ALTER)
             else Stage("RATE", "PASS", StageLamp.PASS),
-            if (plan.dacBits < format.bitsPerSample) {
-                Stage("DEPTH", if (format.lossy) "→${plan.dacBits}" else "${format.bitsPerSample}→${plan.dacBits}", StageLamp.ALTER)
-            } else {
-                Stage("DEPTH", "PASS", StageLamp.PASS)
+            when {
+                eqOn -> Stage("DSP", if (reduced) "EQ→${plan.dacBits}" else "EQ", StageLamp.ALTER)
+                reduced -> Stage(
+                    "DSP",
+                    if (format.lossy) "→${plan.dacBits}" else "${format.bitsPerSample}→${plan.dacBits}",
+                    StageLamp.ALTER,
+                )
+                else -> Stage("DSP", "PASS", StageLamp.PASS)
             },
             Stage(
                 "DAC",
                 "${plan.dacBits}/${khz(plan.outputRate)}",
-                if (plan.bitPerfect) StageLamp.PASS else StageLamp.ALTER,
+                if (plan.bitPerfect && !eqOn) StageLamp.PASS else StageLamp.ALTER,
             ),
         )
     }
@@ -403,6 +379,7 @@ private fun Verdict(
     dacInUse: Boolean,
     chosenMode: OutputMode?,
     codec: String,
+    eqOn: Boolean,
 ) {
     val word: String
     val color: Color
@@ -422,9 +399,10 @@ private fun Verdict(
         format.lossy -> {
             word = "LOSSY SOURCE"; color = Hifi.Amber
             detail = "$codec is a lossy format, so bit-perfect doesn't apply. It's decoded on the phone and sent " +
-                "straight to your DAC at ${khz(plan.outputRate)} kHz / ${plan.dacBits}-bit, skipping Android's mixer."
+                "straight to your DAC at ${khz(plan.outputRate)} kHz / ${plan.dacBits}-bit, skipping Android's mixer." +
+                if (eqOn) " The equalizer is shaping the sound." else ""
         }
-        plan.bitPerfect -> {
+        plan.bitPerfect && !eqOn -> {
             word = "BIT-PERFECT"; color = Hifi.Vfd
             detail = "Your DAC receives the file's samples unchanged."
         }
@@ -439,6 +417,7 @@ private fun Verdict(
                             "${khz(plan.outputRate)} kHz."
                     )
                 }
+                if (eqOn) add("The equalizer is on, so the audio is processed. Turn it off for bit-perfect playback.")
                 if (plan.dacBits < format.bitsPerSample) {
                     add("${format.bitsPerSample}-bit is reduced to ${plan.dacBits}-bit with dither.")
                 }
@@ -457,17 +436,28 @@ private fun Verdict(
 }
 
 @Composable
-private fun ProgressBar(progress: Progress) {
-    val fraction = if (progress.durationMs > 0) {
-        (progress.positionMs.toFloat() / progress.durationMs).coerceIn(0f, 1f)
-    } else 0f
-    Spacer(Modifier.height(14.dp))
-    Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Hifi.Hairline)) {
-        Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(Hifi.Vfd))
-    }
-    Spacer(Modifier.height(6.dp))
+private fun SeekBar(progress: Progress, onSeek: (Long) -> Unit) {
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val duration = progress.durationMs.toFloat()
+    val shown = dragging ?: progress.positionMs.toFloat().coerceIn(0f, duration)
+    Spacer(Modifier.height(10.dp))
+    Slider(
+        value = shown,
+        onValueChange = { dragging = it },
+        onValueChangeFinished = {
+            dragging?.let { onSeek(it.toLong()) }
+            dragging = null
+        },
+        valueRange = 0f..duration,
+        colors = SliderDefaults.colors(
+            thumbColor = Hifi.Ink,
+            activeTrackColor = Hifi.Vfd,
+            inactiveTrackColor = Hifi.Hairline,
+        ),
+        modifier = Modifier.height(28.dp),
+    )
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(formatDuration(progress.positionMs), style = HifiType.DisplaySmall.copy(color = Hifi.Ink))
+        Text(formatDuration(shown.toLong()), style = HifiType.DisplaySmall.copy(color = Hifi.Ink))
         if (progress.underruns > 0) {
             Text("${progress.underruns} dropouts", style = HifiType.DisplaySmall.copy(color = Hifi.Amber))
         }
@@ -476,30 +466,48 @@ private fun ProgressBar(progress: Progress) {
 }
 
 @Composable
-private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth().height(54.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (playing) Hifi.Faceplate else Hifi.Vfd,
-            contentColor = if (playing) Hifi.Ink else Hifi.Faceplate,
-        ),
-        border = if (playing) BorderStroke(1.dp, Hifi.Hairline) else null,
-    ) {
-        if (playing) {
-            Box(Modifier.size(12.dp).background(LocalContentColor.current))
-        } else {
-            Icon(Icons.Filled.PlayArrow, contentDescription = null)
+private fun TransportRow(
+    playing: Boolean,
+    canSkip: Boolean,
+    hasNext: Boolean,
+    onPrevious: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        SkipButton(Transport.PREVIOUS, enabled = canSkip, onClick = onPrevious, label = "Previous")
+        Spacer(Modifier.width(28.dp))
+        Box(
+            Modifier
+                .size(64.dp)
+                .clip(CircleShape)
+                .background(Hifi.Vfd)
+                .clickable(onClickLabel = if (playing) "Pause" else "Play", onClick = onPlayPause),
+            contentAlignment = Alignment.Center,
+        ) {
+            TransportGlyph(if (playing) Transport.PAUSE else Transport.PLAY, Hifi.Faceplate, 30.dp)
         }
-        Spacer(Modifier.width(10.dp))
-        Text(if (playing) "STOP" else "PLAY", style = HifiType.Brand.copy(color = LocalContentColor.current))
+        Spacer(Modifier.width(28.dp))
+        SkipButton(Transport.NEXT, enabled = hasNext, onClick = onNext, label = "Next")
+    }
+}
+
+@Composable
+private fun SkipButton(kind: Transport, enabled: Boolean, onClick: () -> Unit, label: String) {
+    Box(
+        Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClickLabel = label, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        TransportGlyph(kind, if (enabled) Hifi.Ink else Hifi.Label.copy(alpha = 0.35f), 24.dp)
     }
 }
 
 @Composable
 private fun VolumeRow(volume: VolumeState?, onChange: (Float) -> Unit) {
-    Spacer(Modifier.height(14.dp))
+    Spacer(Modifier.height(12.dp))
     if (volume == null) {
         Text(
             "This DAC has no volume control, so it plays at full level. Turn your IEMs or amp down first.",
@@ -534,129 +542,6 @@ private fun VolumeRow(volume: VolumeState?, onChange: (Float) -> Unit) {
     Text("Set inside the DAC — the audio data stays untouched.", style = HifiType.Caption)
 }
 
-// ---- Library -------------------------------------------------------------------------------
-
-@Composable
-private fun LibraryHeader(count: Int, onOpenFile: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("LIBRARY", style = HifiType.Engraved)
-        Spacer(Modifier.width(8.dp))
-        Text("$count", style = HifiType.DisplaySmall.copy(color = Hifi.Label))
-        Spacer(Modifier.weight(1f))
-        TextButton(onClick = onOpenFile) {
-            Icon(Icons.Filled.Add, contentDescription = null, tint = Hifi.Ink, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Open file", style = HifiType.Caption.copy(color = Hifi.Ink))
-        }
-    }
-}
-
-@Composable
-private fun SearchField(query: String, onChange: (String) -> Unit) {
-    OutlinedTextField(
-        value = query,
-        onValueChange = onChange,
-        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
-        placeholder = { Text("Search songs or artists", style = HifiType.Caption) },
-        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Hifi.Label) },
-        singleLine = true,
-        textStyle = HifiType.Body,
-        shape = RoundedCornerShape(10.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Hifi.Vfd,
-            unfocusedBorderColor = Hifi.Hairline,
-            cursorColor = Hifi.Vfd,
-            focusedTextColor = Hifi.Ink,
-            unfocusedTextColor = Hifi.Ink,
-        ),
-    )
-}
-
-@Composable
-private fun PermissionCard(onAllow: () -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp)
-            .clip(shape)
-            .border(1.dp, Hifi.Hairline, shape)
-            .padding(16.dp),
-    ) {
-        Text("See the music on this phone.", style = HifiType.Body.copy(color = Hifi.Ink))
-        Text("The app only reads your music. Nothing leaves the phone.", style = HifiType.Caption)
-        Spacer(Modifier.height(12.dp))
-        Button(
-            onClick = onAllow,
-            colors = ButtonDefaults.buttonColors(containerColor = Hifi.Vfd, contentColor = Hifi.Faceplate),
-        ) { Text("Allow access to music") }
-    }
-}
-
-private data class FormatTag(val text: String, val color: Color)
-
-@Composable
-private fun formatTag(track: Track, state: PlayerState, actions: PlayerActions): FormatTag {
-    // Reading formatsVersion re-runs this once the file's header has been parsed.
-    val result = state.formatsVersion.let { actions.formatOf(track) } ?: return FormatTag("···", Hifi.Label)
-    val format = result.getOrNull() ?: return FormatTag("ERR", Hifi.Fault)
-    val text = sourceLabel(format, track.codec, separator = " ")
-    if (state.dac !is DacStatus.InUse) return FormatTag(text, Hifi.Label)
-    val plan = actions.planFor(format)
-    return FormatTag(
-        text,
-        when {
-            plan == null -> Hifi.Fault
-            plan.bitPerfect -> Hifi.Vfd
-            else -> Hifi.Amber
-        },
-    )
-}
-
-private fun trackSubtitle(track: Track, actions: PlayerActions): String {
-    val duration = track.durationMs.takeIf { it > 0 } ?: actions.formatOf(track)?.getOrNull()?.durationMs ?: 0
-    return listOfNotNull(track.artist, duration.takeIf { it > 0 }?.let(::formatDuration), track.codec)
-        .joinToString(" · ")
-}
-
-@Composable
-private fun TrackRow(
-    track: Track,
-    subtitle: String,
-    tag: FormatTag,
-    selected: Boolean,
-    playing: Boolean,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(10.dp)
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(if (selected) Hifi.Panel else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                track.title,
-                style = HifiType.Body.copy(
-                    color = Hifi.Ink,
-                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(subtitle, style = HifiType.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Spacer(Modifier.width(12.dp))
-        Lamp(tag.color, size = 6.dp, glow = playing)
-        Spacer(Modifier.width(7.dp))
-        Text(tag.text, style = HifiType.DisplaySmall.copy(color = tag.color))
-    }
-}
-
 @Composable
 private fun LogDialog(lines: List<String>, onShare: () -> Unit, onClose: () -> Unit) {
     AlertDialog(
@@ -674,3 +559,9 @@ private fun LogDialog(lines: List<String>, onShare: () -> Unit, onClose: () -> U
         containerColor = Hifi.Panel,
     )
 }
+
+internal val LibraryTab.label: String
+    get() = when (this) {
+        LibraryTab.SONGS -> "SONGS"
+        LibraryTab.ALBUMS -> "ALBUMS"
+    }

@@ -61,6 +61,11 @@ data class PlaybackPlan(
     val bitPerfect: Boolean,
 )
 
+/** One equalizer filter. Frequencies in Hz, gain in dB; [q] sets the width (higher is narrower). */
+data class EqBand(val type: Type, val frequencyHz: Float, val gainDb: Float, val q: Float) {
+    enum class Type { PEAK, LOW_SHELF, HIGH_SHELF }
+}
+
 /** libsamplerate sinc converter used when the DAC lacks the source rate. */
 enum class ResampleQuality { BEST, MEDIUM, FAST }
 
@@ -177,6 +182,23 @@ class UsbAudioOutput private constructor(
 
     fun stop() = synchronized(lock) {
         if (handle != 0L) NativeBridge.nativeStop(handle)
+    }
+
+    /**
+     * Applies an equalizer after any resampling (an empty [bands] list with 0 dB preamp turns it off).
+     * Takes effect within ~10 ms, mid-song included. While it is on, audio is processed, so playback
+     * is not bit-perfect. Settings persist across [start] calls until changed.
+     */
+    fun setEqualizer(bands: List<EqBand>, preampDb: Float) = synchronized(lock) {
+        checkOpen()
+        val flat = FloatArray(bands.size * 4)
+        bands.forEachIndexed { i, b ->
+            flat[i * 4] = b.type.ordinal.toFloat()
+            flat[i * 4 + 1] = b.frequencyHz
+            flat[i * 4 + 2] = b.gainDb
+            flat[i * 4 + 3] = b.q
+        }
+        NativeBridge.nativeSetEqualizer(handle, flat, preampDb)
     }
 
     /** Sets the DAC's hardware volume, keeping the audio data itself untouched. */

@@ -145,3 +145,21 @@ extern "C" JNIEXPORT jintArray JNICALL JNI_FN(nativeModes)(JNIEnv* env, jobject,
     }
     return toIntArray(env, out);
 }
+
+// bands: flattened (type, frequencyHz, gainDb, q) per band; an empty array turns the EQ off.
+extern "C" JNIEXPORT void JNICALL JNI_FN(nativeSetEqualizer)(JNIEnv* env, jobject, jlong h, jfloatArray bands,
+                                                           jfloat preampDb) {
+    const jsize n = env->GetArrayLength(bands);
+    std::vector<float> flat(static_cast<size_t>(n));
+    env->GetFloatArrayRegion(bands, 0, n, flat.data());
+    std::vector<uac::EqBand> list;
+    for (size_t i = 0; i + 3 < flat.size(); i += 4) {
+        uac::EqBand b;
+        b.type = static_cast<uac::EqBand::Type>(int(flat[i]));
+        b.frequency = flat[i + 1];
+        b.gainDb = flat[i + 2];
+        b.q = flat[i + 3];
+        list.push_back(b);
+    }
+    streamer(h)->setEqualizer(list, preampDb);
+}

@@ -1,11 +1,13 @@
 // Unit tests for the pure C++ UAC core. Built with the NDK and run on the phone
 // by scripts/run-native-tests.sh (no host compiler needed).
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <string>
 #include <vector>
 
+#include "../../main/cpp/uac/Equalizer.h"
 #include "../../main/cpp/uac/Pcm.h"
 #include "../../main/cpp/uac/UacDescriptors.h"
 
@@ -399,6 +401,68 @@ int main() {
         CHECK(uac::chooseOutputRate(44100, {32000, 96000, 48000}) == 48000);        // nearest higher
         CHECK(uac::chooseOutputRate(192000, {44100, 48000}) == 48000);              // nearest lower
         CHECK(uac::chooseOutputRate(48000, {}) == 0);
+    });
+
+    test("equalizer: flat settings are inactive and pass audio unchanged", [] {
+        uac::Equalizer eq;
+        eq.configure({{uac::EqBand::Type::Peak, 1000, 0.0, 1.0}}, 0.0, 48000, 2);
+        CHECK(!eq.active());
+        std::vector<float> s = {0.5f, -0.25f, 0.125f, 0.0f};
+        eq.process(s.data(), 2);
+        CHECK(s[0] == 0.5f && s[1] == -0.25f && s[2] == 0.125f);
+    });
+
+    test("equalizer: peak and shelf responses match their settings", [] {
+        uac::Equalizer peak;
+        peak.configure({{uac::EqBand::Type::Peak, 1000, 6.0, 1.0}}, 0.0, 48000, 2);
+        CHECK(peak.active());
+        CHECK(std::fabs(peak.responseDb(1000, 48000) - 6.0) < 0.05);
+        CHECK(std::fabs(peak.responseDb(60, 48000)) < 0.3);
+
+        uac::Equalizer low;
+        low.configure({{uac::EqBand::Type::LowShelf, 100, 6.0, 0.707}}, 0.0, 44100, 2);
+        CHECK(std::fabs(low.responseDb(20, 44100) - 6.0) < 0.3);
+        CHECK(std::fabs(low.responseDb(10000, 44100)) < 0.1);
+
+        uac::Equalizer high;
+        high.configure({{uac::EqBand::Type::HighShelf, 8000, -6.0, 0.707}}, -2.0, 96000, 2);
+        CHECK(std::fabs(high.responseDb(30000, 96000) - (-8.0)) < 0.5);
+        CHECK(std::fabs(high.responseDb(100, 96000) - (-2.0)) < 0.1);  // preamp applies everywhere
+    });
+
+    test("equalizer: a real 1 kHz tone gets the designed boost", [] {
+        uac::Equalizer eq;
+        eq.configure({{uac::EqBand::Type::Peak, 1000, 6.0, 1.0}}, 0.0, 48000, 2);
+        const size_t frames = 48000;
+        std::vector<float> s(frames * 2);
+        for (size_t i = 0; i < frames; ++i) {
+            const float v = 0.25f * float(std::sin(2 * M_PI * 1000 * double(i) / 48000));
+            s[2 * i] = v;
+            s[2 * i + 1] = v;
+        }
+        eq.process(s.data(), frames);
+        double sumSq = 0;
+        for (size_t i = frames / 2; i < frames; ++i) sumSq += double(s[2 * i]) * s[2 * i];  // after settling
+        const double rms = std::sqrt(sumSq / double(frames / 2));
+        const double gainDb = 20 * std::log10(rms / (0.25 / std::sqrt(2.0)));
+        CHECK(std::fabs(gainDb - 6.0) < 0.1);
+    });
+
+    test("equalizer: extreme settings stay stable", [] {
+        uac::Equalizer eq;
+        eq.configure({{uac::EqBand::Type::Peak, 30, 15, 8}, {uac::EqBand::Type::LowShelf, 20, 15, 0.3},
+                      {uac::EqBand::Type::HighShelf, 20000, -15, 4}, {uac::EqBand::Type::Peak, 23999, 12, 1}},
+                     -15, 48000, 2);
+        std::vector<float> s(2 * 48000);
+        uint32_t seed = 1;
+        for (float& v : s) {
+            seed = seed * 1664525u + 1013904223u;
+            v = float(int32_t(seed)) / 2147483648.0f;
+        }
+        eq.process(s.data(), 48000);
+        bool finite = true;
+        for (float v : s) finite &= std::isfinite(v) && std::fabs(v) < 100.0f;
+        CHECK(finite);
     });
 
     test("ring buffer wraps around and preserves bytes", [] {

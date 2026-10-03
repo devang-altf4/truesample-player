@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
@@ -133,7 +134,8 @@ int64_t ffSeek(void* user, int64_t offset, int whence) {
 
 // ---- FFmpeg ----------------------------------------------------------------------------
 
-bool openFfmpeg(Decoder* d) {
+// Opens the container only (headers, tags, attached pictures) on our descriptor.
+bool openFormat(Decoder* d) {
     auto* ff = new FfmpegStream();
     d->ff = ff;
     auto* ioBuffer = static_cast<uint8_t*>(av_malloc(kIoBufferSize));
@@ -151,6 +153,12 @@ bool openFfmpeg(Decoder* d) {
         avio_context_free(&io);
         return false;
     }
+    return true;
+}
+
+bool openFfmpeg(Decoder* d) {
+    if (!openFormat(d)) return false;
+    FfmpegStream* ff = d->ff;
     if (avformat_find_stream_info(ff->format, nullptr) < 0) return false;
     const AVCodec* codec = nullptr;
     ff->streamIndex = av_find_best_stream(ff->format, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
@@ -335,5 +343,68 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativeSeek)(JNIEnv*, jclass, jlong h, jlong fr
 }
 
 JNIEXPORT void JNICALL JNI_FN(nativeClose)(JNIEnv*, jclass, jlong h) { delete decoder(h); }
+
+}  // extern "C"
+
+// ---- Library scanning: format + tags, and cover art ------------------------------------
+
+namespace {
+
+std::string tag(const AVFormatContext* format, const AVStream* stream, const char* key) {
+    const AVDictionaryEntry* e = av_dict_get(format->metadata, key, nullptr, 0);
+    if (!e && stream) e = av_dict_get(stream->metadata, key, nullptr, 0);
+    return e && e->value ? e->value : "";
+}
+
+jobjectArray toStringArray(JNIEnv* env, const std::vector<std::string>& values) {
+    jobjectArray out = env->NewObjectArray(jsize(values.size()), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < values.size(); ++i) {
+        jstring s = env->NewStringUTF(values[i].c_str());
+        env->SetObjectArrayElement(out, jsize(i), s);
+        env->DeleteLocalRef(s);
+    }
+    return out;
+}
+
+}  // namespace
+
+#define PROBE_FN(name) Java_com_truesample_player_MediaProbe_##name
+
+extern "C" {
+
+// Takes ownership of `fd`. Returns sampleRate, channels, bits, totalFrames, lossy, codec,
+// title, artist, album, albumArtist, track, disc, date, genre — or null if unreadable.
+JNIEXPORT jobjectArray JNICALL PROBE_FN(nativeProbe)(JNIEnv* env, jclass, jint fd) {
+    av_log_set_level(AV_LOG_ERROR);
+    Decoder d;
+    d.fd = fd;
+    if (!openFfmpeg(&d)) return nullptr;
+    const AVFormatContext* f = d.ff->format;
+    const AVStream* s = f->streams[d.ff->streamIndex];
+    std::vector<std::string> v = {
+        std::to_string(d.sampleRate), std::to_string(d.channels), std::to_string(d.bits),
+        std::to_string(d.totalFrames), d.lossy ? "1" : "0", d.codecName,
+        tag(f, s, "title"), tag(f, s, "artist"), tag(f, s, "album"), tag(f, s, "album_artist"),
+        tag(f, s, "track"), tag(f, s, "disc"), tag(f, s, "date"), tag(f, s, "genre"),
+    };
+    return toStringArray(env, v);
+}
+
+// Takes ownership of `fd`. Returns the embedded cover picture (JPEG/PNG bytes) or null.
+JNIEXPORT jbyteArray JNICALL PROBE_FN(nativeCoverArt)(JNIEnv* env, jclass, jint fd) {
+    av_log_set_level(AV_LOG_ERROR);
+    Decoder d;
+    d.fd = fd;
+    if (!openFormat(&d)) return nullptr;
+    const AVFormatContext* f = d.ff->format;
+    for (unsigned i = 0; i < f->nb_streams; ++i) {
+        const AVStream* s = f->streams[i];
+        if (!(s->disposition & AV_DISPOSITION_ATTACHED_PIC) || s->attached_pic.size <= 0) continue;
+        jbyteArray out = env->NewByteArray(s->attached_pic.size);
+        env->SetByteArrayRegion(out, 0, s->attached_pic.size, reinterpret_cast<const jbyte*>(s->attached_pic.data));
+        return out;
+    }
+    return nullptr;
+}
 
 }  // extern "C"

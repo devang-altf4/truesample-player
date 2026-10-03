@@ -25,4 +25,5 @@ internal object NativeBridge {
         handle: Long, sampleRate: Int, bitsPerSample: Int, channels: Int, modeIndex: Int, modeRate: Int,
     ): IntArray?
     external fun nativeModes(handle: Long): IntArray
+    external fun nativeSetEqualizer(handle: Long, bands: FloatArray, preampDb: Float)
 }

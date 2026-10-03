@@ -39,6 +39,16 @@ check exactly what happens to their audio.
   when you give it back to Android.
 - **Plays almost any format:** FLAC, WAV, AIFF, ALAC, WavPack, APE, TAK, MP3, AAC/M4A,
   Ogg Vorbis, Opus, MKA, CAF and DSD (as PCM for now).
+- **Albums and cover art:** albums grouped from your files' tags (sorted by disc and track), with
+  covers from the file itself, Android's thumbnails, or a `cover.jpg` in the folder.
+- **Choose your sources:** all music on the phone and/or specific folders, including files Android
+  doesn't index (DSF, APE, WavPack). Short voice clips are hidden by default.
+- **Background playback** with a media notification and lock-screen controls (play/pause,
+  previous/next, close), plus the play/pause buttons on headsets and many USB DACs.
+- **Pause and resume where you left off**, a seek bar, and a play queue (next/previous, auto-advance).
+- **Graphic EQ** (10 bands with presets) and **parametric EQ** (up to 8 peak/shelf filters), with a
+  live frequency-response curve and automatic preamp so boosts never clip. The EQ shapes the sound,
+  so playback isn't bit-perfect while it's on, and the signal path says so.
 - **Music library** with search, and each track's real format read from the file.
 - **Share diagnostics:** one tap sends the DAC's descriptors and driver logs, for
   reporting problems with a specific DAC.
@@ -133,7 +143,7 @@ Release builds are signed with a key you provide in a `keystore.properties` file
 ## Roadmap
 
 - Confirm and tune UAC2 on real hi-res dongles
-- Native DSD (DoP), gapless playback, queue/playlists, background playback
+- Native DSD (DoP), gapless playback, playlists
 - Implicit-feedback DACs, more CPU architectures
 
 ## Credits and licences

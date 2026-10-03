@@ -199,11 +199,20 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         }
         resampleRatio_ = double(outRate) / sampleRate;
         maxPushFrames_ = size_t(double(chunkFrames) * resampleRatio_) + 64;
-        resampleIn_.resize(chunkFrames * channels);
         resampleOut_.resize(maxPushFrames_ * channels);
-        resampledInt_.resize(maxPushFrames_ * channels);
     } else {
         maxPushFrames_ = chunkFrames;
+    }
+    // Float path (resampler and/or equalizer). Always ready: the EQ can be switched on mid-song.
+    resampleIn_.resize(chunkFrames * channels);
+    resampledInt_.resize(std::max(maxPushFrames_, chunkFrames) * channels);
+    outputRate_ = outRate;
+    {
+        std::lock_guard<std::mutex> lock(eqMutex_);
+        eq_.configure(eqBands_, eqPreampDb_, outRate, channels);
+        eq_.reset();  // new stream: no memory of the previous song
+        eqDirty_ = false;
+        eqActiveFlag_ = eq_.active();
     }
 
     channels_ = channels;
@@ -215,13 +224,16 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     sourceSubslot_ = f.subslotBytes;
     packetsPerTransfer_ = std::max<uint32_t>(1, pps * kTransferMillis / 1000);
     ring_ = std::make_unique<uac::RingBuffer>(size_t(outRate) * frameBytes_ * kRingMillis / 1000);
-    packBuffer_.resize(maxPushFrames_ * frameBytes_);
-    if (lossless || f.bitResolution >= 32) {
+    packBuffer_.resize(std::max(maxPushFrames_, chunkFrames) * frameBytes_);
+    // Processed (float) audio is always dithered to the DAC's depth; the untouched integer
+    // path only when the source has more bits than the DAC.
+    if (f.bitResolution >= 32) {
         ditherer_.reset();
     } else {
         ditherer_ = std::make_unique<uac::Ditherer>(f.bitResolution);
-        ditherBuffer_.resize(maxPushFrames_ * f.channels);
+        ditherBuffer_.resize(std::max(maxPushFrames_, chunkFrames) * f.channels);
     }
+    ditherIntegerPath_ = !lossless;
 
     const size_t transferBytes = size_t(packetsPerTransfer_) * capFrames * frameBytes_;
     transferBuffers_.assign(kTransfersInFlight, std::vector<uint8_t>(transferBytes));
@@ -263,7 +275,7 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
     info.deviceRate = deviceRate;
     info.subslotBytes = f.subslotBytes;
     info.bitResolution = f.bitResolution;
-    info.bitPerfect = lossless;
+    info.bitPerfect = lossless && !eq_.active();
     info.resampled = resampling;
     LOGI("streaming %u Hz %u-bit source -> %u Hz, alt %u (%u-bit in %u-byte slots)%s%s, %u packets/s", sampleRate,
          sourceBits, outRate, f.altSetting, f.bitResolution, f.subslotBytes, resampling ? ", resampled" : "",
@@ -585,21 +597,47 @@ void UsbStreamer::eventLoop() {
 long UsbStreamer::write(const int32_t* pcm, size_t frames) {
     if (!streaming_) return -1;
     const size_t channels = channels_;
-    const size_t chunkFrames = resampler_ ? resampleIn_.size() / channels : maxPushFrames_;
+    const size_t chunkFrames = resampleIn_.size() / channels;
     for (size_t done = 0; done < frames;) {
+        applyPendingEqualizer();
         const size_t n = std::min(chunkFrames, frames - done);
         const int32_t* src = pcm + done * channels;
         bool ok;
-        if (resampler_) {
-            src_int_to_float_array(src, resampleIn_.data(), int(n * channels));
-            ok = resampleAndPush(n, false);
+        if (!resampler_ && !eq_.active()) {
+            ok = push(src, n, ditherIntegerPath_);  // untouched samples: bit-perfect when the format allows
         } else {
-            ok = push(src, n);
+            src_int_to_float_array(src, resampleIn_.data(), int(n * channels));
+            if (resampler_) {
+                ok = resampleAndPush(n, false);
+            } else {
+                eq_.process(resampleIn_.data(), n);
+                src_float_to_int_array(resampleIn_.data(), resampledInt_.data(), int(n * channels));
+                ok = push(resampledInt_.data(), n, true);
+            }
         }
         if (!ok) return -1;
         done += n;
     }
     return long(frames);
+}
+
+void UsbStreamer::setEqualizer(const std::vector<uac::EqBand>& bands, double preampDb) {
+    std::lock_guard<std::mutex> lock(eqMutex_);
+    eqBands_ = bands;
+    eqPreampDb_ = preampDb;
+    eqDirty_ = true;
+}
+
+bool UsbStreamer::equalizerActive() const { return eqActiveFlag_; }
+
+// Runs on the writing thread only, between chunks, so filters never change mid-buffer.
+void UsbStreamer::applyPendingEqualizer() {
+    if (!eqDirty_.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(eqMutex_);
+    eq_.configure(eqBands_, eqPreampDb_, outputRate_, channels_);
+    eqDirty_ = false;
+    eqActiveFlag_ = eq_.active();
+    LOGI("equalizer %s: %zu bands, preamp %.1f dB", eq_.active() ? "on" : "off", eqBands_.size(), eqPreampDb_);
 }
 
 bool UsbStreamer::resampleAndPush(size_t frames, bool endOfInput) {
@@ -618,8 +656,9 @@ bool UsbStreamer::resampleAndPush(size_t frames, bool endOfInput) {
             return false;
         }
         if (d.output_frames_gen > 0) {
+            if (eq_.active()) eq_.process(resampleOut_.data(), size_t(d.output_frames_gen));
             src_float_to_int_array(resampleOut_.data(), resampledInt_.data(), int(d.output_frames_gen * channels));
-            if (!push(resampledInt_.data(), size_t(d.output_frames_gen))) return false;
+            if (!push(resampledInt_.data(), size_t(d.output_frames_gen), true)) return false;
         }
         d.data_in += d.input_frames_used * channels;
         d.input_frames -= d.input_frames_used;
@@ -628,9 +667,9 @@ bool UsbStreamer::resampleAndPush(size_t frames, bool endOfInput) {
     }
 }
 
-bool UsbStreamer::push(const int32_t* src, size_t frames) {
+bool UsbStreamer::push(const int32_t* src, size_t frames, bool dither) {
     const size_t channels = channels_;
-    if (ditherer_) {
+    if (dither && ditherer_) {
         ditherer_->process(src, ditherBuffer_.data(), frames * channels);
         src = ditherBuffer_.data();
     }

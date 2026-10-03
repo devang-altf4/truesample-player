@@ -20,8 +20,8 @@ android {
         applicationId = "com.truesample.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         externalNativeBuild {
             cmake {
                 arguments += "-DANDROID_STL=c++_static"
@@ -47,6 +47,12 @@ android {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")
+        }
+        debug {
+            // Installs next to the release app, so testing never replaces the real one.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "TrueSample Debug")
         }
     }
 
