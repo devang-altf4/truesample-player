@@ -1,4 +1,4 @@
-// JNI glue for com.freeaudiobypasser.usbaudio.NativeBridge.
+// JNI glue for com.truesample.usbaudio.NativeBridge.
 #include <jni.h>
 
 #include <string>
@@ -10,7 +10,7 @@
 namespace {
 
 void throwUsbAudio(JNIEnv* env, const std::string& message) {
-    jclass cls = env->FindClass("com/freeaudiobypasser/usbaudio/UsbAudioException");
+    jclass cls = env->FindClass("com/truesample/usbaudio/UsbAudioException");
     if (cls) env->ThrowNew(cls, message.c_str());
 }
 
@@ -24,7 +24,7 @@ jintArray toIntArray(JNIEnv* env, const std::vector<jint>& values) {
 
 }  // namespace
 
-#define JNI_FN(name) Java_com_freeaudiobypasser_usbaudio_NativeBridge_##name
+#define JNI_FN(name) Java_com_truesample_usbaudio_NativeBridge_##name
 
 extern "C" {
 

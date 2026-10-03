@@ -17,6 +17,7 @@ target_compile_options(decoder PRIVATE -O2)
 target_link_libraries(decoder
         ${FFMPEG}/lib/libavformat.a
         ${FFMPEG}/lib/libavcodec.a
+        ${FFMPEG}/lib/libswresample.a
         ${FFMPEG}/lib/libavutil.a
         log m)
 # Only the decoder entry points are needed from the static FFmpeg archives.

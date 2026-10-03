@@ -39,7 +39,8 @@ fi
 cd "ffmpeg-$FFMPEG_VERSION"
 
 DEMUXERS=aac,aiff,ape,caf,dsf,flac,iff,matroska,mov,mp3,ogg,tak,w64,wav,wv
-DECODERS=aac,alac,ape,dsd_lsbf,dsd_lsbf_planar,dsd_msbf,dsd_msbf_planar,flac,mp1,mp2,mp3,opus,tak,vorbis,wavpack
+# Float MP3 decoders: the fixed-point ones output 16-bit ints that look lossless.
+DECODERS=aac,alac,ape,dsd_lsbf,dsd_lsbf_planar,dsd_msbf,dsd_msbf_planar,flac,mp1float,mp2float,mp3float,opus,tak,vorbis,wavpack
 DECODERS=$DECODERS,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_s16be,pcm_s16le,pcm_s24be,pcm_s24le
 DECODERS=$DECODERS,pcm_s32be,pcm_s32le,pcm_u8
 PARSERS=aac,flac,mpegaudio,opus,vorbis
@@ -56,7 +57,7 @@ PARSERS=aac,flac,mpegaudio,opus,vorbis
     --host-ld="$TC/bin/clang$EXE" --host-ldflags="--target=$TARGET --sysroot=$TC/sysroot" \
     --enable-static --disable-shared --enable-pic \
     --disable-programs --disable-doc --disable-network --disable-autodetect \
-    --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample --disable-postproc \
+    --disable-avdevice --disable-avfilter --disable-swscale --disable-postproc \
     --disable-everything \
     --enable-demuxer="$DEMUXERS" --enable-decoder="$DECODERS" --enable-parser="$PARSERS"
 
@@ -65,7 +66,7 @@ PARSERS=aac,flac,mpegaudio,opus,vorbis
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp -r "$PREFIX/include" "$PREFIX/lib" "$OUT/"
+cp -r "$PREFIX/include" "$PREFIX/lib" "$OUT/"  # swresample is needed by the Opus decoder
 rm -rf "$OUT/lib/pkgconfig"
 cp COPYING.LGPLv2.1 "$ROOT/third_party/ffmpeg/COPYING.LGPLv2.1"
 echo "FFmpeg $FFMPEG_VERSION built for arm64-v8a -> $OUT"

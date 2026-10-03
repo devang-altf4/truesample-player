@@ -1,4 +1,4 @@
-package com.freeaudiobypasser.app
+package com.truesample.player
 
 import android.Manifest
 import android.app.PendingIntent
@@ -24,12 +24,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
-import com.freeaudiobypasser.app.ui.HifiTheme
-import com.freeaudiobypasser.app.ui.PlayerScreen
-import com.freeaudiobypasser.usbaudio.OutputMode
-import com.freeaudiobypasser.usbaudio.PlaybackPlan
-import com.freeaudiobypasser.usbaudio.UsbAudioException
-import com.freeaudiobypasser.usbaudio.UsbAudioOutput
+import com.truesample.player.ui.HifiTheme
+import com.truesample.player.ui.PlayerScreen
+import com.truesample.usbaudio.OutputMode
+import com.truesample.usbaudio.PlaybackPlan
+import com.truesample.usbaudio.UsbAudioException
+import com.truesample.usbaudio.UsbAudioOutput
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -187,7 +187,7 @@ class MainActivity : ComponentActivity(), PlayerActions {
 
     override fun shareDiagnostics() {
         val report = buildString {
-            appendLine("Free Audio Bypasser ${BuildConfig.VERSION_NAME} diagnostics")
+            appendLine("TrueSample Player ${BuildConfig.VERSION_NAME} diagnostics")
             appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("DAC: ${state.dac}")
             usbManager.deviceList.values.forEach {
@@ -206,12 +206,12 @@ class MainActivity : ComponentActivity(), PlayerActions {
             }
         }
         val dir = File(cacheDir, "diagnostics").apply { mkdirs() }
-        val file = File(dir, "free-audio-bypasser-diagnostics.txt").apply { writeText(report) }
+        val file = File(dir, "truesample-diagnostics.txt").apply { writeText(report) }
         val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
         val send = Intent(Intent.ACTION_SEND)
             .setType("text/plain")
             .putExtra(Intent.EXTRA_STREAM, uri)
-            .putExtra(Intent.EXTRA_SUBJECT, "Free Audio Bypasser diagnostics")
+            .putExtra(Intent.EXTRA_SUBJECT, "TrueSample Player diagnostics")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         startActivity(Intent.createChooser(send, "Share diagnostics"))
     }
@@ -437,8 +437,8 @@ class MainActivity : ComponentActivity(), PlayerActions {
     }
 
     companion object {
-        private const val TAG = "FreeAudioBypasser"
-        private const val ACTION_USB_PERMISSION = "com.freeaudiobypasser.app.USB_PERMISSION"
+        private const val TAG = "TrueSample"
+        private const val ACTION_USB_PERMISSION = "com.truesample.player.USB_PERMISSION"
 
         private fun modeKey(device: UsbDevice) = "mode_%04x_%04x".format(device.vendorId, device.productId)
 

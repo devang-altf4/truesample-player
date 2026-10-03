@@ -1,4 +1,4 @@
-package com.freeaudiobypasser.app
+package com.truesample.player
 
 import android.content.ContentUris
 import android.content.Context

@@ -1,12 +1,12 @@
-package com.freeaudiobypasser.app
+package com.truesample.player
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import com.freeaudiobypasser.usbaudio.OutputMode
-import com.freeaudiobypasser.usbaudio.PlaybackPlan
+import com.truesample.usbaudio.OutputMode
+import com.truesample.usbaudio.PlaybackPlan
 import java.util.Locale
 
 sealed interface DacStatus {

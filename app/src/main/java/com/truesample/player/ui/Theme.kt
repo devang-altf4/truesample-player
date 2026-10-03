@@ -1,4 +1,4 @@
-package com.freeaudiobypasser.app.ui
+package com.truesample.player.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -10,7 +10,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import com.freeaudiobypasser.app.R
+import com.truesample.player.R
 
 /**
  * A hi-fi front panel: graphite faceplate, smoked display windows, and two indicator

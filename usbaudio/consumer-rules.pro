@@ -1,3 +1,3 @@
 # JNI looks these up by name.
--keep class com.freeaudiobypasser.usbaudio.NativeBridge { native <methods>; }
--keep class com.freeaudiobypasser.usbaudio.UsbAudioException { <init>(java.lang.String); }
+-keep class com.truesample.usbaudio.NativeBridge { native <methods>; }
+-keep class com.truesample.usbaudio.UsbAudioException { <init>(java.lang.String); }

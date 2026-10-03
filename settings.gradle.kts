@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "free-audio-bypasser"
+rootProject.name = "truesample-player"
 include(":usbaudio", ":app")

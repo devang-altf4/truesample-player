@@ -1,4 +1,4 @@
-package com.freeaudiobypasser.app.ui
+package com.truesample.player.ui
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -65,17 +65,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.freeaudiobypasser.app.DacStatus
-import com.freeaudiobypasser.app.PlayerActions
-import com.freeaudiobypasser.app.PlayerState
-import com.freeaudiobypasser.app.Progress
-import com.freeaudiobypasser.app.SourceFormat
-import com.freeaudiobypasser.app.Track
-import com.freeaudiobypasser.app.VolumeState
-import com.freeaudiobypasser.app.formatDuration
-import com.freeaudiobypasser.app.khz
-import com.freeaudiobypasser.usbaudio.OutputMode
-import com.freeaudiobypasser.usbaudio.PlaybackPlan
+import com.truesample.player.DacStatus
+import com.truesample.player.PlayerActions
+import com.truesample.player.PlayerState
+import com.truesample.player.Progress
+import com.truesample.player.SourceFormat
+import com.truesample.player.Track
+import com.truesample.player.VolumeState
+import com.truesample.player.formatDuration
+import com.truesample.player.khz
+import com.truesample.usbaudio.OutputMode
+import com.truesample.usbaudio.PlaybackPlan
 import java.util.Locale
 
 @Composable
@@ -138,7 +138,7 @@ fun PlayerScreen(state: PlayerState, actions: PlayerActions) {
 @Composable
 private fun Header(onShowLog: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("FREE AUDIO BYPASSER", style = HifiType.Brand)
+        Text("TRUESAMPLE PLAYER", style = HifiType.Brand)
         Spacer(Modifier.weight(1f))
         TextButton(onClick = onShowLog) { Text("LOG", style = HifiType.Engraved) }
     }

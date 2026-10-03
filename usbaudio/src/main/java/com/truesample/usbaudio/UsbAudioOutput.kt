@@ -1,4 +1,4 @@
-package com.freeaudiobypasser.usbaudio
+package com.truesample.usbaudio
 
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice

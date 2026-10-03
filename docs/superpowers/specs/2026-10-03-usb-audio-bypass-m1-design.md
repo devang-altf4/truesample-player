@@ -1,4 +1,4 @@
-# Free Audio Bypasser — Milestone 1 design
+# TrueSample Player — Milestone 1 design
 
 Date: 2026-10-03
 Status: approved (architecture), build started

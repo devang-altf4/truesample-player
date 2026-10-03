@@ -12,12 +12,12 @@ val signing = Properties().apply {
 }
 
 android {
-    namespace = "com.freeaudiobypasser.app"
+    namespace = "com.truesample.player"
     compileSdk = 36
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.freeaudiobypasser.app"
+        applicationId = "com.truesample.player"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

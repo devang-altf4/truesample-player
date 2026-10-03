@@ -172,7 +172,14 @@ bool openFfmpeg(Decoder* d) {
         case AV_SAMPLE_FMT_U8: d->bits = 8; break;
         case AV_SAMPLE_FMT_S16: d->bits = 16; break;
         case AV_SAMPLE_FMT_S32: d->bits = (raw > 0 && raw <= 32) ? raw : 32; break;
-        default: d->bits = 32; d->lossy = true; break;  // float output: lossy codecs and DSD
+        default: d->bits = 32; d->lossy = true; break;  // float output (e.g. DSD converted to PCM)
+    }
+    // Ask FFmpeg's codec database rather than guessing from the sample format:
+    // some lossy decoders output integers that would otherwise look lossless.
+    const AVCodecDescriptor* desc = avcodec_descriptor_get(ff->codec->codec_id);
+    if (desc && (desc->props & AV_CODEC_PROP_LOSSY) && !(desc->props & AV_CODEC_PROP_LOSSLESS)) {
+        d->lossy = true;
+        d->bits = 32;  // decoded audio has no true bit depth; never call it bit-perfect
     }
     if (stream->duration > 0 && d->sampleRate > 0) {
         d->totalFrames = av_rescale_q(stream->duration, stream->time_base, AVRational{1, d->sampleRate});
@@ -252,7 +259,7 @@ int readFfmpeg(Decoder* d, int32_t* out, int maxFrames) {
 
 }  // namespace
 
-#define JNI_FN(name) Java_com_freeaudiobypasser_app_AudioDecoder_##name
+#define JNI_FN(name) Java_com_truesample_player_AudioDecoder_##name
 
 extern "C" {
 
