@@ -96,10 +96,21 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
 
     featureUnit_ = uac::findPlaybackFeatureUnit(device_, device_.outputs[0]);
     if (featureUnit_) {
+        // Remember the DAC's own settings: they live in the DAC and would otherwise
+        // stay changed (e.g. quieter) after we hand it back to Android.
+        savedVolume_.clear();
+        for (uint8_t ch : volumeChannels()) {
+            uint8_t buf[2];
+            if (controlFeature(kGetCur, kVolumeControl, ch, buf, 2) == 2) savedVolume_.push_back({ch, le16(buf)});
+        }
+        savedMute_ = -1;
         if (featureUnit_->masterMute) {
+            uint8_t mute = 0;
+            if (controlFeature(kGetCur, kMuteControl, 0, &mute, 1) == 1) savedMute_ = mute;
             uint8_t off = 0;
             controlFeature(kSetCur, kMuteControl, 0, &off, 1);
         }
+        for (const auto& [ch, value] : savedVolume_) LOGI("DAC volume channel %u was %.1f dB", ch, value / 256.0);
         setVolume(kStartVolume);
     }
     LOGI("opened DAC:\n%s", uac::describe(device_).c_str());
@@ -114,56 +125,12 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         return false;
     }
 
-    const int speed = libusb_get_device_speed(libusb_get_device(handle_));
-
-    auto packetsPerSecond = [&](const uac::OutputFormat& f) {
-        const uint32_t shift = std::clamp<uint32_t>(f.interval, 1, 16) - 1;
-        return (speed >= LIBUSB_SPEED_HIGH ? 8000u : 1000u) >> std::min<uint32_t>(shift, 3);
-    };
-
-    auto fits = [&](const uac::OutputFormat& f, uint32_t rate) {
-        if (f.formatTag != 1 || f.channels != channels || !f.supportsRate(rate)) return false;
-        const uint32_t maxFrames = uac::PacketScheduler(rate, packetsPerSecond(f)).maxFrames();
-        return maxFrames * f.frameBytes() <= f.maxPacketBytes;
-    };
-
-    // Play at the source rate when the DAC has it; otherwise resample to the best rate it does have.
-    std::vector<uint32_t> candidates;
-    for (const uac::OutputFormat& f : device_.outputs) {
-        if (f.continuousRates) {
-            candidates.insert(candidates.end(), {std::clamp(sampleRate, f.minRate, f.maxRate), f.minRate, f.maxRate});
-        } else {
-            candidates.insert(candidates.end(), f.rates.begin(), f.rates.end());
-        }
-    }
-    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
-                                    [&](uint32_t r) {
-                                        return std::none_of(device_.outputs.begin(), device_.outputs.end(),
-                                                            [&](const uac::OutputFormat& f) { return fits(f, r); });
-                                    }),
-                     candidates.end());
-    const uint32_t outRate = uac::chooseOutputRate(sampleRate, candidates);
-    if (outRate == 0) {
-        char msg[160];
-        std::snprintf(msg, sizeof msg, "The DAC has no %u-channel output.", channels);
-        error = msg;
-        return false;
-    }
-    const bool resampling = outRate != sampleRate;
-
-    // Prefer the smallest format that holds the source losslessly; otherwise the
-    // deepest one available, with dither.
-    int best = -1;
-    int deepest = -1;
-    for (size_t i = 0; i < device_.outputs.size(); ++i) {
-        const uac::OutputFormat& f = device_.outputs[i];
-        if (!fits(f, outRate)) continue;
-        if (deepest < 0 || f.bitResolution > device_.outputs[deepest].bitResolution) deepest = int(i);
-        if (f.bitResolution < sourceBits) continue;
-        if (best < 0 || f.subslotBytes < device_.outputs[best].subslotBytes) best = int(i);
-    }
-    const bool lossless = best >= 0 && !resampling;
-    if (resampling || best < 0) best = deepest;
+    Plan p;
+    if (!plan(sampleRate, sourceBits, channels, p, error)) return false;
+    const int best = p.outputIndex;
+    const uint32_t outRate = p.outputRate;
+    const bool resampling = p.resampling;
+    const bool lossless = p.lossless;
 
     format_ = &device_.outputs[best];
     const uac::OutputFormat& f = *format_;
@@ -269,6 +236,67 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
          sourceBits, outRate, f.altSetting, f.bitResolution, f.subslotBytes, resampling ? ", resampled" : "",
          ditherer_ ? ", dithered" : "", pps);
     return true;
+}
+
+bool UsbStreamer::plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, Plan& out,
+                       std::string& error) const {
+    if (!handle_) {
+        error = "DAC is not open.";
+        return false;
+    }
+    auto fits = [&](const uac::OutputFormat& f, uint32_t rate) {
+        if (f.formatTag != 1 || f.channels != channels || !f.supportsRate(rate)) return false;
+        const uint32_t maxFrames = uac::PacketScheduler(rate, packetsPerSecond(f)).maxFrames();
+        return maxFrames * f.frameBytes() <= f.maxPacketBytes;
+    };
+
+    // Play at the source rate when the DAC has it; otherwise resample to the best rate it does have.
+    std::vector<uint32_t> candidates;
+    for (const uac::OutputFormat& f : device_.outputs) {
+        if (f.continuousRates) {
+            candidates.insert(candidates.end(), {std::clamp(sampleRate, f.minRate, f.maxRate), f.minRate, f.maxRate});
+        } else {
+            candidates.insert(candidates.end(), f.rates.begin(), f.rates.end());
+        }
+    }
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                    [&](uint32_t r) {
+                                        return std::none_of(device_.outputs.begin(), device_.outputs.end(),
+                                                            [&](const uac::OutputFormat& f) { return fits(f, r); });
+                                    }),
+                     candidates.end());
+    const uint32_t outRate = uac::chooseOutputRate(sampleRate, candidates);
+    if (outRate == 0) {
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "The DAC has no %u-channel output.", channels);
+        error = msg;
+        return false;
+    }
+    const bool resampling = outRate != sampleRate;
+
+    // Prefer the smallest format that holds the source losslessly; otherwise the
+    // deepest one available, with dither.
+    int best = -1;
+    int deepest = -1;
+    for (size_t i = 0; i < device_.outputs.size(); ++i) {
+        const uac::OutputFormat& f = device_.outputs[i];
+        if (!fits(f, outRate)) continue;
+        if (deepest < 0 || f.bitResolution > device_.outputs[deepest].bitResolution) deepest = int(i);
+        if (f.bitResolution < sourceBits) continue;
+        if (best < 0 || f.subslotBytes < device_.outputs[best].subslotBytes) best = int(i);
+    }
+    out.lossless = best >= 0 && !resampling;
+    out.outputIndex = (resampling || best < 0) ? deepest : best;
+    out.outputRate = outRate;
+    out.resampling = resampling;
+    out.dacBits = device_.outputs[out.outputIndex].bitResolution;
+    return true;
+}
+
+uint32_t UsbStreamer::packetsPerSecond(const uac::OutputFormat& f) const {
+    const int speed = libusb_get_device_speed(libusb_get_device(handle_));
+    const uint32_t shift = std::clamp<uint32_t>(f.interval, 1, 16) - 1;
+    return (speed >= LIBUSB_SPEED_HIGH ? 8000u : 1000u) >> std::min<uint32_t>(shift, 3);
 }
 
 void UsbStreamer::fillTransfer(libusb_transfer* t) {
@@ -437,6 +465,18 @@ void UsbStreamer::close() {
         eventThread_.join();
     }
     if (handle_) {
+        if (featureUnit_ && !disconnected_) {
+            for (const auto& [ch, value] : savedVolume_) {
+                uint8_t buf[2] = {uint8_t(value), uint8_t(uint16_t(value) >> 8)};
+                const int rc = controlFeature(kSetCur, kVolumeControl, ch, buf, 2);
+                LOGI("restore DAC volume channel %u to %.1f dB: %s", ch, value / 256.0,
+                     rc == 2 ? "ok" : libusb_error_name(rc));
+            }
+            if (savedMute_ >= 0) {
+                uint8_t mute = uint8_t(savedMute_);
+                controlFeature(kSetCur, kMuteControl, 0, &mute, 1);
+            }
+        }
         // Hand the DAC back to Android's own USB audio driver.
         for (const uac::OutputFormat& f : device_.outputs) {
             const int rc = libusb_release_interface(handle_, f.interfaceNumber);

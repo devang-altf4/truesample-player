@@ -44,6 +44,15 @@ public:
         bool disconnected = false;
     };
 
+    // How a source format would be played on this DAC.
+    struct Plan {
+        int outputIndex = -1;
+        uint32_t outputRate = 0;
+        uint32_t dacBits = 0;
+        bool resampling = false;
+        bool lossless = false;  // bit-perfect
+    };
+
     ~UsbStreamer();
 
     // `fd` comes from UsbDeviceConnection.getFileDescriptor(); the caller keeps it
@@ -54,6 +63,8 @@ public:
     // resampleQuality: 0 = best, 1 = medium, 2 = fast (libsamplerate sinc converters).
     bool start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality, StreamInfo& info,
                std::string& error);
+    // Works out how start() would play this format, without touching the DAC.
+    bool plan(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, Plan& plan, std::string& error) const;
     // Blocks until all frames are queued. Returns frames queued, or -1 if the
     // stream stopped or the device went away.
     long write(const int32_t* interleaved, size_t frames);
@@ -71,6 +82,7 @@ private:
     bool push(const int32_t* interleaved, size_t frames);  // dither, pack, queue for USB
     bool resampleAndPush(size_t frames, bool endOfInput);  // frames already in resampleIn_
     void eventLoop();
+    uint32_t packetsPerSecond(const uac::OutputFormat& format) const;
     int controlFeature(uint8_t request, uint8_t control, uint8_t channel, uint8_t* data, uint16_t length);
     std::vector<uint8_t> volumeChannels() const;
 
@@ -78,6 +90,8 @@ private:
     libusb_device_handle* handle_ = nullptr;
     uac::UacDevice device_;
     const uac::FeatureUnit* featureUnit_ = nullptr;
+    std::vector<std::pair<uint8_t, int16_t>> savedVolume_;  // DAC's own volume per channel, restored on close
+    int savedMute_ = -1;
 
     // Active stream
     const uac::OutputFormat* format_ = nullptr;

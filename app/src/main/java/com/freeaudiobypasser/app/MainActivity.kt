@@ -1,22 +1,25 @@
 package com.freeaudiobypasser.app
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.Log
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
@@ -24,6 +27,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import com.freeaudiobypasser.usbaudio.PlaybackPlan
 import com.freeaudiobypasser.usbaudio.UsbAudioException
 import com.freeaudiobypasser.usbaudio.UsbAudioOutput
 import com.freeaudiobypasser.usbaudio.VolumeRange
@@ -38,13 +42,21 @@ import kotlin.concurrent.thread
 class MainActivity : ComponentActivity() {
 
     private lateinit var usbManager: UsbManager
+    private lateinit var library: MusicLibrary
+    private lateinit var adapter: TrackAdapter
+
     private lateinit var dacText: TextView
     private lateinit var connectButton: Button
-    private lateinit var fileText: TextView
+    private lateinit var nowTitle: TextView
     private lateinit var statusText: TextView
     private lateinit var positionText: TextView
+    private lateinit var playButton: Button
     private lateinit var volumeText: TextView
     private lateinit var volumeBar: SeekBar
+    private lateinit var libraryTitle: TextView
+    private lateinit var permissionButton: Button
+    private lateinit var emptyText: TextView
+    private lateinit var logToggle: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
 
@@ -52,33 +64,48 @@ class MainActivity : ComponentActivity() {
     private var output: UsbAudioOutput? = null
     private var volumeRange: VolumeRange? = null
     private var userVolumeDb: Float? = null
-    private var fileUri: Uri? = null
-    private var fileSampleRate = 0
-    @Volatile private var outputRate = 0
-    private var fileTotalFrames = 0L
+    private val planCache = HashMap<Triple<Int, Int, Int>, PlaybackPlan?>()
+
+    private var selected: Track? = null
+    private val pickedTracks = mutableListOf<Track>()  // opened with "Open file…"
     private var playThread: Thread? = null
+    @Volatile private var isPlaying = false
     @Volatile private var stopRequested = false
+    @Volatile private var outputRate = 0
+    private var playingFormat: SourceFormat? = null
+    private var pendingPlay = false  // play as soon as USB permission is granted
+
+    private val audioPermission =
+        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private val requestAudioPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        reloadLibrary()
+    }
 
     private val pickFile = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) onFileChosen(uri)
+        if (uri != null) onFilePicked(uri)
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
             when (intent.action) {
-                ACTION_USB_PERMISSION ->
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && device != null) {
+                ACTION_USB_PERMISSION -> {
+                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    if (granted && device != null) {
                         openDac(device)
+                        if (pendingPlay && output != null) play()
                     } else {
-                        log("USB permission was denied.")
+                        showStatus("USB permission was denied, so the app can't use your DAC.")
                     }
+                    pendingPlay = false
+                }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     if (device != null && device.deviceName == output?.device?.deviceName) {
                         log("DAC unplugged.")
                         stopPlayback()
                         closeDac()
-                        statusText.text = "DAC unplugged"
+                        showStatus("DAC unplugged")
                     }
                     refreshDacLabel()
                 }
@@ -98,32 +125,47 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         usbManager = getSystemService(UsbManager::class.java)
+        library = MusicLibrary(this)
 
         dacText = findViewById(R.id.dacText)
-        fileText = findViewById(R.id.fileText)
+        connectButton = findViewById(R.id.connectButton)
+        nowTitle = findViewById(R.id.nowTitle)
         statusText = findViewById(R.id.statusText)
         positionText = findViewById(R.id.positionText)
+        playButton = findViewById(R.id.playButton)
         volumeText = findViewById(R.id.volumeText)
         volumeBar = findViewById(R.id.volumeBar)
+        libraryTitle = findViewById(R.id.libraryTitle)
+        permissionButton = findViewById(R.id.permissionButton)
+        emptyText = findViewById(R.id.emptyText)
+        logToggle = findViewById(R.id.logToggle)
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
 
-        connectButton = findViewById(R.id.connectButton)
+        adapter = TrackAdapter(library, ::planFor) { output != null }
+        val trackList = findViewById<ListView>(R.id.trackList)
+        trackList.adapter = adapter
+        trackList.setOnItemClickListener { _, _, position, _ -> onTrackTapped(adapter.getItem(position)) }
+
         connectButton.setOnClickListener {
             if (output == null) {
-                connectDac()
+                connectDac(thenPlay = false)
             } else {
                 stopPlayback()
                 closeDac()
-                statusText.text = "Stopped"
-                log("Released the DAC back to Android.")
+                log("Gave the DAC back to Android.")
             }
         }
+        playButton.setOnClickListener { if (isPlaying) stopPlayback() else play() }
         findViewById<Button>(R.id.chooseButton).setOnClickListener {
             pickFile.launch(arrayOf("audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/*"))
         }
-        findViewById<Button>(R.id.playButton).setOnClickListener { play() }
-        findViewById<Button>(R.id.stopButton).setOnClickListener { stopPlayback() }
+        permissionButton.setOnClickListener { requestAudioPermission.launch(audioPermission) }
+        logToggle.setOnClickListener {
+            val show = logScroll.visibility != View.VISIBLE
+            logScroll.visibility = if (show) View.VISIBLE else View.GONE
+            logToggle.text = if (show) "Hide driver log ▴" else "Show driver log ▾"
+        }
         volumeBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
                 if (fromUser) setVolumeFromBar(progress)
@@ -141,28 +183,13 @@ class MainActivity : ComponentActivity() {
         UsbAudioOutput.setLogFile(File(filesDir, "usbaudio.log"))
         log("--- app started ---", toScreen = false)
         refreshDacLabel()
+        updatePlayerViews()
         main.post(ticker)
     }
 
     override fun onResume() {
         super.onResume()
-        showTestTracks()
-    }
-
-    /** Files copied to the app's own Music folder (no storage permission needed). */
-    private fun showTestTracks() {
-        val container = findViewById<LinearLayout>(R.id.testTracks)
-        container.removeAllViews()
-        val dir = getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: return
-        val tracks = dir.listFiles { f -> f.extension.lowercase() in setOf("flac", "wav") }
-            ?.sortedBy { it.name.lowercase() }.orEmpty()
-        for (track in tracks) {
-            container.addView(Button(this).apply {
-                text = "▶ ${track.nameWithoutExtension}"
-                isAllCaps = false
-                setOnClickListener { onFileChosen(Uri.fromFile(track)) }
-            })
-        }
+        reloadLibrary()
     }
 
     override fun onDestroy() {
@@ -170,114 +197,109 @@ class MainActivity : ComponentActivity() {
         unregisterReceiver(usbReceiver)
         stopPlayback()
         closeDac()
+        library.shutdown()
         super.onDestroy()
     }
 
-    private fun findDac(): UsbDevice? = usbManager.deviceList.values.firstOrNull { UsbAudioOutput.isUsbAudioOutput(it) }
+    // ---- Library -------------------------------------------------------------------------
 
-    private fun refreshDacLabel() {
-        val connected = output
-        connectButton.text = if (connected == null) "Connect DAC" else "Disconnect (give DAC back to Android)"
-        dacText.text = when {
-            connected != null -> "DAC: ${connected.device.productName} — under our control"
-            findDac() != null -> "DAC found: ${findDac()?.productName} (tap Connect)"
-            else -> "No USB DAC plugged in"
-        }
-    }
+    private fun hasAudioPermission() =
+        ContextCompat.checkSelfPermission(this, audioPermission) == PackageManager.PERMISSION_GRANTED
 
-    private fun connectDac() {
-        if (output != null) return log("DAC already connected.")
-        val device = findDac() ?: return log("No USB audio DAC found. Plug it in first.")
-        if (usbManager.hasPermission(device)) {
-            openDac(device)
-        } else {
-            val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
-            val pending = PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_MUTABLE)
-            usbManager.requestPermission(device, pending)
-        }
-    }
-
-    private fun openDac(device: UsbDevice) {
-        try {
-            val out = UsbAudioOutput.open(usbManager, device)
-            output = out
-            val hex = out.rawDescriptors.joinToString(" ") { "%02x".format(it) }
-            Log.i(TAG, "RAW_DESCRIPTORS $hex")
-            File(filesDir, "dac-descriptors-%04x-%04x.bin".format(device.vendorId, device.productId))
-                .writeBytes(out.rawDescriptors)
-            log("Took control of ${device.productName} (VID %04x PID %04x)".format(device.vendorId, device.productId))
-            log(out.description.trimEnd())
-            log("Raw descriptors (${out.rawDescriptors.size} bytes):\n" + hexDump(out.rawDescriptors))
-            setupVolume(out)
-        } catch (e: UsbAudioException) {
-            log("Could not connect: ${e.message}")
-        }
-        refreshDacLabel()
-    }
-
-    private fun closeDac() {
-        output?.close()
-        output = null
-        volumeRange = null
-        volumeBar.isEnabled = false
-        volumeText.text = "Volume: (connect the DAC)"
-        refreshDacLabel()
-    }
-
-    private fun setupVolume(out: UsbAudioOutput) {
-        userVolumeDb?.let { out.setVolumeDb(it) }  // the library starts quiet; restore the user's level
-        val range = out.volumeRange
-        volumeRange = range
-        if (range == null) {
-            volumeBar.isEnabled = false
-            volumeText.text = "Volume: this DAC has no hardware volume — use with care, output is full scale"
-            return
-        }
-        volumeBar.isEnabled = true
-        volumeBar.progress = (((range.currentDb - range.minDb) / (range.maxDb - range.minDb)) * volumeBar.max).toInt()
-        volumeText.text = "Volume: %.1f dB (hardware, audio data untouched)".format(range.currentDb)
-    }
-
-    private fun setVolumeFromBar(progress: Int) {
-        val range = volumeRange ?: return
-        val db = range.minDb + (range.maxDb - range.minDb) * progress / volumeBar.max
-        if (output?.setVolumeDb(db) == true) {
-            userVolumeDb = db
-            volumeText.text = "Volume: %.1f dB (hardware, audio data untouched)".format(db)
-        }
-    }
-
-    private fun onFileChosen(uri: Uri) {
-        stopPlayback()
-        try {
-            val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return log("Could not open the file.")
-            AudioDecoder.open(pfd).use { dec ->
-                fileUri = uri
-                fileSampleRate = dec.sampleRate
-                fileTotalFrames = dec.totalFrames
-                fileText.text = "${displayName(uri)}\n${dec.sampleRate} Hz · ${dec.bitsPerSample}-bit · " +
-                    "${dec.channels} ch · ${formatTime(dec.totalFrames / dec.sampleRate.coerceAtLeast(1))}"
+    private fun reloadLibrary() {
+        val granted = hasAudioPermission()
+        permissionButton.visibility = if (granted) View.GONE else View.VISIBLE
+        thread(name = "library") {
+            val tracks = runCatching { library.load(includeMediaStore = granted) }.getOrElse {
+                log("Could not read your music library: ${it.message}")
+                emptyList()
             }
-        } catch (e: Exception) {
-            log("Could not read the file: ${e.message}")
+            ui {
+                adapter.tracks = pickedTracks + tracks
+                libraryTitle.text = "Your music (${adapter.count})"
+                emptyText.visibility = if (adapter.count == 0 && granted) View.VISIBLE else View.GONE
+                library.probe(adapter.tracks) { ui { adapter.notifyDataSetChanged(); updatePlayerViews() } }
+            }
         }
+    }
+
+    private fun onFilePicked(uri: Uri) {
+        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        } ?: uri.lastPathSegment ?: "file"
+        val track = Track(uri, name.substringBeforeLast('.'), null, 0, name)
+        pickedTracks.removeAll { it.uri == uri }
+        pickedTracks.add(0, track)
+        adapter.tracks = listOf(track) + adapter.tracks.filter { it.uri != uri }
+        library.probe(listOf(track)) { ui { adapter.notifyDataSetChanged(); updatePlayerViews() } }
+        onTrackTapped(track)
+    }
+
+    private fun onTrackTapped(track: Track) {
+        val wasPlaying = isPlaying
+        selected = track
+        adapter.selected = track
+        if (wasPlaying) {
+            stopPlayback()  // switching songs while music plays starts the new one straight away
+            play()
+        }
+        updatePlayerViews()
+    }
+
+    private fun planFor(format: SourceFormat): PlaybackPlan? {
+        val out = output ?: return null
+        return planCache.getOrPut(Triple(format.sampleRate, format.bitsPerSample, format.channels)) {
+            out.plan(format.sampleRate, format.bitsPerSample, format.channels)
+        }
+    }
+
+    // ---- Player --------------------------------------------------------------------------
+
+    /** Shows the selected song and only offers Play once a song is chosen. */
+    private fun updatePlayerViews() {
+        val track = selected
+        nowTitle.text = track?.title ?: "Tap a song below to choose it"
+        playButton.visibility = if (track != null) View.VISIBLE else View.GONE
+        playButton.text = if (isPlaying) "■  Stop" else "▶  Play"
+        positionText.visibility = if (isPlaying) View.VISIBLE else View.GONE
+        if (track != null && !isPlaying) {
+            val badge = adapter.badgeFor(track)
+            showStatus(
+                if (output == null) "${badge.text}\nTap Play — the app will connect to your USB DAC."
+                else badge.text,
+                badge.color,
+            )
+        }
+    }
+
+    private fun showStatus(text: String, color: Int = STATUS_COLOR) {
+        statusText.visibility = View.VISIBLE
+        statusText.text = text
+        statusText.setTextColor(color)
     }
 
     private fun play() {
-        val out = output ?: return log("Connect the DAC first.")
-        val uri = fileUri ?: return log("Choose a file first.")
-        if (playThread?.isAlive == true) return
+        val track = selected ?: return
+        if (isPlaying) return
+        val out = output
+        if (out == null) {
+            connectDac(thenPlay = true)
+            return
+        }
         stopRequested = false
+        isPlaying = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        playThread = thread(name = "playback") { playbackLoop(out, uri) }
+        updatePlayerViews()
+        playThread = thread(name = "playback") { playbackLoop(out, track) }
     }
 
-    private fun playbackLoop(out: UsbAudioOutput, uri: Uri) {
+    private fun playbackLoop(out: UsbAudioOutput, track: Track) {
         try {
-            val pfd = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("file vanished")
+            val pfd = contentResolver.openFileDescriptor(track.uri, "r") ?: throw IllegalStateException("file vanished")
             AudioDecoder.open(pfd).use { dec ->
                 val info = out.start(dec.sampleRate, dec.bitsPerSample, dec.channels)
                 outputRate = info.outputRate
+                playingFormat = SourceFormat(dec.sampleRate, dec.bitsPerSample, dec.channels, dec.totalFrames)
                 val dacBits = info.format.bitResolution
                 val label = when {
                     info.bitPerfect ->
@@ -285,8 +307,7 @@ class MainActivity : ComponentActivity() {
                     info.resampled ->
                         "${khz(info.sampleRate)} → ${khz(info.outputRate)} · ${info.bitsPerSample}→$dacBits-bit " +
                             "→ USB direct · CONVERTED"
-                    else ->
-                        "${khz(info.sampleRate)} · ${info.bitsPerSample}→$dacBits-bit dithered → USB direct"
+                    else -> "${khz(info.sampleRate)} · ${info.bitsPerSample}→$dacBits-bit dithered → USB direct"
                 }
                 // Say plainly why the audio is not bit-perfect.
                 val reasons = buildList {
@@ -299,8 +320,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 ui {
-                    statusText.text = (listOf(label) + reasons).joinToString("\n")
-                    log("Playing via alt setting ${info.format.altSetting}: $dacBits-bit in " +
+                    showStatus((listOf(label) + reasons).joinToString("\n"))
+                    log("Playing ${track.title} via alt setting ${info.format.altSetting}: $dacBits-bit in " +
                         "${info.format.subslotBytes}-byte slots at ${info.outputRate} Hz" +
                         if (info.deviceRate != 0) ", DAC confirms ${info.deviceRate} Hz" else "")
                     reasons.forEach { log(it) }
@@ -321,27 +342,34 @@ class MainActivity : ComponentActivity() {
                 out.stop()
                 val stats = out.stats()
                 ui {
-                    statusText.text = when {
-                        stats.disconnected -> "DAC unplugged"
-                        finished -> "Finished · underruns: ${stats.underruns}"
-                        else -> "Stopped"
+                    when {
+                        stats.disconnected -> showStatus("DAC unplugged")
+                        finished -> showStatus("Finished · underruns: ${stats.underruns}")
                     }
                     log("Sent ${stats.framesSent} frames, underruns ${stats.underruns}, USB errors ${stats.transferErrors}")
                 }
             }
         } catch (e: UsbAudioException) {
             ui {
-                statusText.text = "Cannot play this file"
+                showStatus("Can't play this song: ${e.message}")
                 log(e.message ?: "error")
             }
         } catch (e: Exception) {
             Log.e(TAG, "playback failed", e)
             ui {
-                statusText.text = "Playback error"
+                showStatus("Playback error: ${e.message}")
                 log("Playback error: $e")
             }
         } finally {
-            ui { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            isPlaying = false
+            ui {
+                // A new song may already be playing if the user switched tracks.
+                if (!isPlaying) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    playButton.text = "▶  Play"
+                    positionText.visibility = View.GONE
+                }
+            }
         }
     }
 
@@ -350,26 +378,114 @@ class MainActivity : ComponentActivity() {
         output?.stop()
         playThread?.join(3000)
         playThread = null
+        isPlaying = false
+        updatePlayerViews()
     }
 
     private fun updatePosition() {
         val out = output
-        if (out == null || playThread?.isAlive != true || fileSampleRate == 0) return
+        val format = playingFormat
+        if (out == null || !isPlaying || format == null || outputRate == 0) return
         val stats = try {
             out.stats()
         } catch (e: IllegalStateException) {
             return
         }
         // framesSent counts frames at the DAC's rate, which differs from the file's when resampling.
-        val rate = if (outputRate > 0) outputRate else fileSampleRate
-        positionText.text = "${formatTime(stats.framesSent / rate)} / " +
-            "${formatTime(fileTotalFrames / fileSampleRate)} · underruns ${stats.underruns}"
+        positionText.text = "${TrackAdapter.formatDuration(stats.framesSent * 1000 / outputRate)} / " +
+            "${TrackAdapter.formatDuration(format.durationMs)} · underruns ${stats.underruns}"
     }
 
-    private fun displayName(uri: Uri): String =
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        } ?: uri.lastPathSegment ?: "file"
+    // ---- DAC -----------------------------------------------------------------------------
+
+    private fun findDac(): UsbDevice? = usbManager.deviceList.values.firstOrNull { UsbAudioOutput.isUsbAudioOutput(it) }
+
+    private fun refreshDacLabel() {
+        val connected = output
+        val found = findDac()
+        connectButton.visibility = if (connected != null || found != null) View.VISIBLE else View.GONE
+        connectButton.text = if (connected == null) "Connect" else "Give back to Android"
+        dacText.text = when {
+            connected != null -> "🎧 ${connected.device.productName} · in use by this app"
+            found != null -> "🎧 ${found.productName} · ready"
+            else -> "No USB DAC plugged in"
+        }
+    }
+
+    private fun connectDac(thenPlay: Boolean) {
+        val device = findDac()
+        if (device == null) {
+            showStatus("Plug in your USB DAC first.")
+            return
+        }
+        if (usbManager.hasPermission(device)) {
+            openDac(device)
+            if (thenPlay && output != null) play()
+        } else {
+            pendingPlay = thenPlay
+            val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+            val pending = PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_MUTABLE)
+            usbManager.requestPermission(device, pending)
+        }
+    }
+
+    private fun openDac(device: UsbDevice) {
+        if (output != null) return
+        try {
+            val out = UsbAudioOutput.open(usbManager, device)
+            output = out
+            File(filesDir, "dac-descriptors-%04x-%04x.bin".format(device.vendorId, device.productId))
+                .writeBytes(out.rawDescriptors)
+            log("Took control of ${device.productName} (VID %04x PID %04x)".format(device.vendorId, device.productId))
+            log(out.description.trimEnd())
+            setupVolume(out)
+        } catch (e: UsbAudioException) {
+            showStatus("Could not connect to the DAC: ${e.message}")
+            log("Could not connect: ${e.message}")
+        }
+        planCache.clear()
+        adapter.notifyDataSetChanged()
+        refreshDacLabel()
+        updatePlayerViews()
+    }
+
+    private fun closeDac() {
+        output?.close()  // restores the DAC's own volume before handing it back to Android
+        output = null
+        volumeRange = null
+        planCache.clear()
+        volumeText.visibility = View.GONE
+        volumeBar.visibility = View.GONE
+        adapter.notifyDataSetChanged()
+        refreshDacLabel()
+        updatePlayerViews()
+    }
+
+    private fun setupVolume(out: UsbAudioOutput) {
+        userVolumeDb?.let { out.setVolumeDb(it) }  // the library starts quiet; restore the user's level
+        val range = out.volumeRange
+        volumeRange = range
+        volumeText.visibility = View.VISIBLE
+        if (range == null) {
+            volumeBar.visibility = View.GONE
+            volumeText.text = "This DAC has no volume control — output is full scale, use with care"
+            return
+        }
+        volumeBar.visibility = View.VISIBLE
+        volumeBar.progress = (((range.currentDb - range.minDb) / (range.maxDb - range.minDb)) * volumeBar.max).toInt()
+        volumeText.text = "Volume %.1f dB (set in the DAC, audio data untouched)".format(range.currentDb)
+    }
+
+    private fun setVolumeFromBar(progress: Int) {
+        val range = volumeRange ?: return
+        val db = range.minDb + (range.maxDb - range.minDb) * progress / volumeBar.max
+        if (output?.setVolumeDb(db) == true) {
+            userVolumeDb = db
+            volumeText.text = "Volume %.1f dB (set in the DAC, audio data untouched)".format(db)
+        }
+    }
+
+    // ---- Helpers -------------------------------------------------------------------------
 
     private fun log(message: String, toScreen: Boolean = true) {
         Log.i(TAG, message)
@@ -387,15 +503,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "FreeAudioBypasser"
         private const val ACTION_USB_PERMISSION = "com.freeaudiobypasser.app.USB_PERMISSION"
-
-        private fun formatTime(seconds: Long) = "%d:%02d".format(seconds / 60, seconds % 60)
+        private const val STATUS_COLOR = 0xFF2BB3C0.toInt()
 
         /** 44100 -> "44.1 kHz", 48000 -> "48 kHz". */
-        private fun khz(rate: Int): String =
-            if (rate % 1000 == 0) "${rate / 1000} kHz" else "%.1f kHz".format(Locale.US, rate / 1000.0)
-
-        private fun hexDump(bytes: ByteArray): String = bytes.toList().chunked(16).joinToString("\n") { row ->
-            row.joinToString(" ") { "%02x".format(it) }
-        }
+        private fun khz(rate: Int) = "${TrackAdapter.khz(rate)} kHz"
     }
 }

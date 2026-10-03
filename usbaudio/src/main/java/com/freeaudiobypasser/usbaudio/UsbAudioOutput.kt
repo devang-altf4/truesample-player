@@ -43,6 +43,14 @@ data class StreamInfo(
     val resampled: Boolean,
 )
 
+/** How a source format would play on a DAC, from [UsbAudioOutput.plan]. */
+data class PlaybackPlan(
+    val outputRate: Int,
+    val dacBits: Int,
+    val resampled: Boolean,
+    val bitPerfect: Boolean,
+)
+
 /** libsamplerate sinc converter used when the DAC lacks the source rate. */
 enum class ResampleQuality { BEST, MEDIUM, FAST }
 
@@ -110,6 +118,16 @@ class UsbAudioOutput private constructor(
             bitPerfect = r[4] == 1,
             resampled = r[6] == 1,
         )
+    }
+
+    /**
+     * Works out how a source format would be played on this DAC without starting
+     * anything, or returns null if the DAC cannot play it at all (e.g. wrong channel count).
+     */
+    fun plan(sampleRate: Int, bitsPerSample: Int, channels: Int): PlaybackPlan? = synchronized(lock) {
+        checkOpen()
+        val r = NativeBridge.nativePlan(handle, sampleRate, bitsPerSample, channels) ?: return null
+        PlaybackPlan(outputRate = r[0], dacBits = r[1], resampled = r[2] == 1, bitPerfect = r[3] == 1)
     }
 
     /**

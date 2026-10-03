@@ -119,3 +119,12 @@ extern "C" JNIEXPORT void JNICALL JNI_FN(nativeSetLogFile)(JNIEnv* env, jobject,
     ualog::setFile(p);
     env->ReleaseStringUTFChars(path, p);
 }
+
+// Returns outputRate, dacBits, resampled, bitPerfect — or null if the DAC cannot play it at all.
+extern "C" JNIEXPORT jintArray JNICALL JNI_FN(nativePlan)(JNIEnv* env, jobject, jlong h, jint rate, jint bits,
+                                                        jint channels) {
+    UsbStreamer::Plan p;
+    std::string error;
+    if (!streamer(h)->plan(uint32_t(rate), uint32_t(bits), uint32_t(channels), p, error)) return nullptr;
+    return toIntArray(env, {jint(p.outputRate), jint(p.dacBits), p.resampling ? 1 : 0, p.lossless ? 1 : 0});
+}
