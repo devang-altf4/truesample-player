@@ -1,19 +1,23 @@
 #include "UsbStreamer.h"
 
-#include <android/log.h>
 #include <libusb.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 
-#define LOG_TAG "UsbAudio"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#include "Log.h"
 
 namespace {
+
+void onLibusbLog(libusb_context*, enum libusb_log_level level, const char* message) {
+    const size_t len = std::strlen(message);
+    const int length = int(len > 0 && message[len - 1] == '\n' ? len - 1 : len);
+    ualog::write(level == LIBUSB_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN, "libusb: %.*s", length,
+                 message);
+}
 
 constexpr int kTransfersInFlight = 8;
 constexpr uint32_t kTransferMillis = 10;   // audio per transfer
@@ -63,6 +67,8 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
         ctx_ = nullptr;
         return false;
     }
+    libusb_set_log_cb(ctx_, onLibusbLog, LIBUSB_LOG_CB_CONTEXT);
+    libusb_set_option(ctx_, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
     rc = libusb_wrap_sys_device(ctx_, static_cast<intptr_t>(fd), &handle_);
     if (rc != LIBUSB_SUCCESS) {
         error = std::string("libusb could not open the DAC: ") + libusb_error_name(rc);
@@ -72,9 +78,11 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
 
     // Java already force-claimed these (detaching Android's driver); this only
     // updates libusb's own bookkeeping so alt-setting changes are allowed.
-    libusb_claim_interface(handle_, device_.controlInterface);
+    rc = libusb_claim_interface(handle_, device_.controlInterface);
+    LOGI("claim interface %d: %s", device_.controlInterface, libusb_error_name(rc));
     for (const uac::OutputFormat& f : device_.outputs) {
         rc = libusb_claim_interface(handle_, f.interfaceNumber);
+        LOGI("claim interface %u: %s", f.interfaceNumber, libusb_error_name(rc));
         if (rc != LIBUSB_SUCCESS && rc != LIBUSB_ERROR_BUSY) {
             error = std::string("Could not claim the streaming interface: ") + libusb_error_name(rc);
             close();
@@ -351,10 +359,18 @@ void UsbStreamer::close() {
     }
     if (handle_) {
         // Hand the DAC back to Android's own USB audio driver.
-        for (const uac::OutputFormat& f : device_.outputs) libusb_release_interface(handle_, f.interfaceNumber);
+        for (const uac::OutputFormat& f : device_.outputs) {
+            const int rc = libusb_release_interface(handle_, f.interfaceNumber);
+            LOGI("release interface %u: %s", f.interfaceNumber, libusb_error_name(rc));
+        }
         if (device_.controlInterface >= 0) {
-            libusb_release_interface(handle_, device_.controlInterface);
-            if (!disconnected_) libusb_attach_kernel_driver(handle_, device_.controlInterface);
+            int rc = libusb_release_interface(handle_, device_.controlInterface);
+            LOGI("release interface %d: %s", device_.controlInterface, libusb_error_name(rc));
+            if (!disconnected_) {
+                rc = libusb_attach_kernel_driver(handle_, device_.controlInterface);
+                LOGI("reattach Android's driver to interface %d: %s", device_.controlInterface,
+                     libusb_error_name(rc));
+            }
         }
         libusb_close(handle_);  // does not close the wrapped fd; Java closes the connection
         handle_ = nullptr;

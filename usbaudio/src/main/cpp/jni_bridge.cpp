@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "Log.h"
 #include "UsbStreamer.h"
 
 namespace {
@@ -106,3 +107,13 @@ JNIEXPORT jlongArray JNICALL JNI_FN(nativeStats)(JNIEnv* env, jobject, jlong h) 
 }
 
 }  // extern "C"
+
+extern "C" JNIEXPORT void JNICALL JNI_FN(nativeSetLogFile)(JNIEnv* env, jobject, jstring path) {
+    if (!path) {
+        ualog::setFile(nullptr);
+        return;
+    }
+    const char* p = env->GetStringUTFChars(path, nullptr);
+    ualog::setFile(p);
+    env->ReleaseStringUTFChars(path, p);
+}

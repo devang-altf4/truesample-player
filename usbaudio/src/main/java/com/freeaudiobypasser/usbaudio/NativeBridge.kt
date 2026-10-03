@@ -18,4 +18,5 @@ internal object NativeBridge {
     external fun nativeVolumeRange(handle: Long): IntArray
     external fun nativeSetVolume(handle: Long, value256: Int): Boolean
     external fun nativeStats(handle: Long): LongArray
+    external fun nativeSetLogFile(path: String?)
 }

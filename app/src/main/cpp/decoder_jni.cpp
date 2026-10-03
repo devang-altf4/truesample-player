@@ -4,8 +4,8 @@
 #include <jni.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <cstdio>
-#include <string>
 
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
@@ -29,6 +29,45 @@ struct Decoder {
 
 Decoder* decoder(jlong h) { return reinterpret_cast<Decoder*>(h); }
 
+// Read straight from the descriptor we were given. Re-opening it by path
+// (/proc/self/fd/N) fails for files picked through Android's storage access layer.
+int fdOf(void* user) { return static_cast<Decoder*>(user)->fd; }
+
+size_t onRead(void* user, void* out, size_t bytes) {
+    size_t total = 0;
+    while (total < bytes) {
+        const ssize_t n = ::read(fdOf(user), static_cast<uint8_t*>(out) + total, bytes - total);
+        if (n <= 0) break;
+        total += size_t(n);
+    }
+    return total;
+}
+
+off64_t seekTo(void* user, int offset, int origin) {
+    const int whence = origin == 0 ? SEEK_SET : origin == 1 ? SEEK_CUR : SEEK_END;
+    return lseek64(fdOf(user), offset, whence);
+}
+
+drflac_bool32 onSeekFlac(void* user, int offset, drflac_seek_origin origin) {
+    return seekTo(user, offset, origin == DRFLAC_SEEK_SET ? 0 : origin == DRFLAC_SEEK_CUR ? 1 : 2) >= 0;
+}
+
+drwav_bool32 onSeekWav(void* user, int offset, drwav_seek_origin origin) {
+    return seekTo(user, offset, origin == DRWAV_SEEK_SET ? 0 : origin == DRWAV_SEEK_CUR ? 1 : 2) >= 0;
+}
+
+drflac_bool32 onTellFlac(void* user, drflac_int64* cursor) {
+    const off64_t pos = lseek64(fdOf(user), 0, SEEK_CUR);
+    *cursor = pos;
+    return pos >= 0;
+}
+
+drwav_bool32 onTellWav(void* user, drwav_int64* cursor) {
+    const off64_t pos = lseek64(fdOf(user), 0, SEEK_CUR);
+    *cursor = pos;
+    return pos >= 0;
+}
+
 }  // namespace
 
 #define JNI_FN(name) Java_com_freeaudiobypasser_app_AudioDecoder_##name
@@ -39,9 +78,11 @@ extern "C" {
 JNIEXPORT jlong JNICALL JNI_FN(nativeOpen)(JNIEnv*, jclass, jint fd) {
     auto* d = new Decoder();
     d->fd = fd;
-    const std::string path = "/proc/self/fd/" + std::to_string(fd);
-    d->flac = drflac_open_file(path.c_str(), nullptr);
-    if (!d->flac) d->isWav = drwav_init_file(&d->wav, path.c_str(), nullptr);
+    d->flac = drflac_open(onRead, onSeekFlac, onTellFlac, d, nullptr);
+    if (!d->flac) {
+        lseek64(fd, 0, SEEK_SET);
+        d->isWav = drwav_init(&d->wav, onRead, onSeekWav, onTellWav, d, nullptr);
+    }
     if (!d->flac && !d->isWav) {
         delete d;
         return 0;

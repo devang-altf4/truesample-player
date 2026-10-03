@@ -27,6 +27,7 @@ target_link_libraries(usb-1.0 log)
 add_library(usbaudio SHARED
         jni_bridge.cpp
         UsbStreamer.cpp
+        Log.cpp
         uac/UacDescriptors.cpp)
 target_compile_options(usbaudio PRIVATE -Wall -Wextra)
 target_link_libraries(usbaudio usb-1.0 log)

@@ -6,6 +6,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import java.io.Closeable
+import java.io.File
 import java.nio.ByteBuffer
 
 /** One playback format a DAC advertises. */
@@ -158,6 +159,9 @@ class UsbAudioOutput private constructor(
                 throw e
             }
         }
+
+        /** Also append driver logs to [file], or stop when null. Useful on phones that hide app logcat output. */
+        fun setLogFile(file: File?) = NativeBridge.nativeSetLogFile(file?.absolutePath)
 
         /** True when [device] exposes a USB Audio playback interface. */
         fun isUsbAudioOutput(device: UsbDevice): Boolean = playbackInterfaces(device).any {

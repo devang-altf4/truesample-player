@@ -9,12 +9,14 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
@@ -28,6 +30,9 @@ import com.freeaudiobypasser.usbaudio.VolumeRange
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
@@ -46,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private val main = Handler(Looper.getMainLooper())
     private var output: UsbAudioOutput? = null
     private var volumeRange: VolumeRange? = null
+    private var userVolumeDb: Float? = null
     private var fileUri: Uri? = null
     private var fileSampleRate = 0
     private var fileTotalFrames = 0L
@@ -131,8 +137,31 @@ class MainActivity : ComponentActivity() {
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
         ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        UsbAudioOutput.setLogFile(File(filesDir, "usbaudio.log"))
+        log("--- app started ---", toScreen = false)
         refreshDacLabel()
         main.post(ticker)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showTestTracks()
+    }
+
+    /** Files copied to the app's own Music folder (no storage permission needed). */
+    private fun showTestTracks() {
+        val container = findViewById<LinearLayout>(R.id.testTracks)
+        container.removeAllViews()
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: return
+        val tracks = dir.listFiles { f -> f.extension.lowercase() in setOf("flac", "wav") }
+            ?.sortedBy { it.name.lowercase() }.orEmpty()
+        for (track in tracks) {
+            container.addView(Button(this).apply {
+                text = "▶ ${track.nameWithoutExtension}"
+                isAllCaps = false
+                setOnClickListener { onFileChosen(Uri.fromFile(track)) }
+            })
+        }
     }
 
     override fun onDestroy() {
@@ -195,6 +224,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setupVolume(out: UsbAudioOutput) {
+        userVolumeDb?.let { out.setVolumeDb(it) }  // the library starts quiet; restore the user's level
         val range = out.volumeRange
         volumeRange = range
         if (range == null) {
@@ -211,6 +241,7 @@ class MainActivity : ComponentActivity() {
         val range = volumeRange ?: return
         val db = range.minDb + (range.maxDb - range.minDb) * progress / volumeBar.max
         if (output?.setVolumeDb(db) == true) {
+            userVolumeDb = db
             volumeText.text = "Volume: %.1f dB (hardware, audio data untouched)".format(db)
         }
     }
@@ -321,8 +352,11 @@ class MainActivity : ComponentActivity() {
             if (c.moveToFirst()) c.getString(0) else null
         } ?: uri.lastPathSegment ?: "file"
 
-    private fun log(message: String) {
+    private fun log(message: String, toScreen: Boolean = true) {
         Log.i(TAG, message)
+        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        runCatching { File(filesDir, "app.log").appendText("$time $message\n") }
+        if (!toScreen) return
         logText.append(message + "\n")
         logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
     }
