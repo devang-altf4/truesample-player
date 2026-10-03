@@ -17,16 +17,19 @@
 struct libusb_context;
 struct libusb_device_handle;
 struct libusb_transfer;
+struct SRC_STATE_tag;
 
 class UsbStreamer {
 public:
     struct StreamInfo {
         int outputIndex = -1;
-        uint32_t sampleRate = 0;
+        uint32_t sampleRate = 0;  // source
+        uint32_t outputRate = 0;  // what the DAC runs at
         uint32_t deviceRate = 0;  // read back from the DAC, 0 if it cannot report it
         uint32_t subslotBytes = 0;
         uint32_t bitResolution = 0;
         bool bitPerfect = false;
+        bool resampled = false;
     };
 
     struct VolumeRange {
@@ -48,7 +51,9 @@ public:
     bool open(int fd, const uint8_t* rawDescriptors, size_t length, std::string& error);
     const uac::UacDevice& device() const { return device_; }
 
-    bool start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, StreamInfo& info, std::string& error);
+    // resampleQuality: 0 = best, 1 = medium, 2 = fast (libsamplerate sinc converters).
+    bool start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality, StreamInfo& info,
+               std::string& error);
     // Blocks until all frames are queued. Returns frames queued, or -1 if the
     // stream stopped or the device went away.
     long write(const int32_t* interleaved, size_t frames);
@@ -63,6 +68,8 @@ public:
 private:
     static void onTransferDone(libusb_transfer* transfer);
     void fillTransfer(libusb_transfer* transfer);
+    bool push(const int32_t* interleaved, size_t frames);  // dither, pack, queue for USB
+    bool resampleAndPush(size_t frames, bool endOfInput);  // frames already in resampleIn_
     void eventLoop();
     int controlFeature(uint8_t request, uint8_t control, uint8_t channel, uint8_t* data, uint16_t length);
     std::vector<uint8_t> volumeChannels() const;
@@ -84,6 +91,13 @@ private:
     uint32_t packetsPerTransfer_ = 0;
     uint32_t frameBytes_ = 0;
     uint32_t sourceSubslot_ = 0;
+    uint32_t channels_ = 0;
+    size_t maxPushFrames_ = 0;
+    SRC_STATE_tag* resampler_ = nullptr;  // set only when the DAC lacks the source rate
+    double resampleRatio_ = 1.0;
+    std::vector<float> resampleIn_;
+    std::vector<float> resampleOut_;
+    std::vector<int32_t> resampledInt_;
 
     std::thread eventThread_;
     std::atomic<bool> eventThreadRun_{false};

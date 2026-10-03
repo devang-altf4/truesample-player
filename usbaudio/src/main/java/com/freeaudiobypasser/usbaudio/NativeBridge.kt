@@ -10,7 +10,7 @@ internal object NativeBridge {
     external fun nativeOpen(fd: Int, rawDescriptors: ByteArray): Long
     external fun nativeDescribe(handle: Long): String
     external fun nativeFormats(handle: Long): IntArray
-    external fun nativeStart(handle: Long, sampleRate: Int, bitsPerSample: Int, channels: Int): IntArray
+    external fun nativeStart(handle: Long, sampleRate: Int, bitsPerSample: Int, channels: Int, quality: Int): IntArray
     external fun nativeWrite(handle: Long, pcm: ByteBuffer, frames: Int): Int
     external fun nativeDrain(handle: Long)
     external fun nativeStop(handle: Long)

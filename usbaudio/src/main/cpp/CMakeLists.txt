@@ -24,10 +24,25 @@ target_include_directories(usb-1.0
 target_compile_options(usb-1.0 PRIVATE -fvisibility=hidden -pthread -Wno-everything)
 target_link_libraries(usb-1.0 log)
 
+# libsamplerate (BSD-2-Clause) for DACs that lack the source sample rate.
+set(SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/libsamplerate)
+add_library(samplerate STATIC
+        ${SRC_ROOT}/src/samplerate.c
+        ${SRC_ROOT}/src/src_sinc.c
+        ${SRC_ROOT}/src/src_linear.c
+        ${SRC_ROOT}/src/src_zoh.c)
+target_include_directories(samplerate PUBLIC ${SRC_ROOT}/include)
+target_compile_definitions(samplerate PRIVATE
+        ENABLE_SINC_BEST_CONVERTER ENABLE_SINC_MEDIUM_CONVERTER ENABLE_SINC_FAST_CONVERTER
+        HAVE_STDBOOL_H CPU_CLIPS_POSITIVE=0 CPU_CLIPS_NEGATIVE=0
+        PACKAGE="libsamplerate" VERSION="0.2.2")
+target_compile_options(samplerate PRIVATE -O3 -Wno-everything)
+set_target_properties(samplerate PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_library(usbaudio SHARED
         jni_bridge.cpp
         UsbStreamer.cpp
         Log.cpp
         uac/UacDescriptors.cpp)
 target_compile_options(usbaudio PRIVATE -Wall -Wextra)
-target_link_libraries(usbaudio usb-1.0 log)
+target_link_libraries(usbaudio usb-1.0 samplerate log)

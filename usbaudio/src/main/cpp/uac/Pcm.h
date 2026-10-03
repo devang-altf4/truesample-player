@@ -34,6 +34,26 @@ private:
     uint32_t acc_ = 0;
 };
 
+// Picks the DAC rate to play `sourceRate` at, from the rates the DAC supports:
+// exact > integer multiple (44.1k -> 88.2k) > nearest higher > nearest lower.
+// Returns 0 when `rates` is empty.
+inline uint32_t chooseOutputRate(uint32_t sourceRate, const std::vector<uint32_t>& rates) {
+    auto score = [&](uint32_t r) {
+        if (r == sourceRate) return 4;
+        if (sourceRate != 0 && r % sourceRate == 0) return 3;
+        return r > sourceRate ? 2 : 1;
+    };
+    uint32_t pick = 0;
+    for (uint32_t r : rates) {
+        if (r == 0) continue;
+        if (pick == 0 || score(r) > score(pick) ||
+            (score(r) == score(pick) && (score(r) >= 2 ? r < pick : r > pick))) {
+            pick = r;
+        }
+    }
+    return pick;
+}
+
 // Packs 32-bit left-justified little-endian samples into the DAC's subslot size
 // by keeping the most significant bytes. Lossless whenever the source bit depth
 // is <= subslotBytes * 8.

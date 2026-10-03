@@ -60,16 +60,18 @@ JNIEXPORT jintArray JNICALL JNI_FN(nativeFormats)(JNIEnv* env, jobject, jlong h)
     return toIntArray(env, out);
 }
 
-// Returns outputIndex, deviceRate, subslotBytes, bitResolution, bitPerfect.
-JNIEXPORT jintArray JNICALL JNI_FN(nativeStart)(JNIEnv* env, jobject, jlong h, jint rate, jint bits, jint channels) {
+// Returns outputIndex, deviceRate, subslotBytes, bitResolution, bitPerfect, outputRate, resampled.
+JNIEXPORT jintArray JNICALL JNI_FN(nativeStart)(JNIEnv* env, jobject, jlong h, jint rate, jint bits, jint channels,
+                                               jint quality) {
     UsbStreamer::StreamInfo info;
     std::string error;
-    if (!streamer(h)->start(uint32_t(rate), uint32_t(bits), uint32_t(channels), info, error)) {
+    if (!streamer(h)->start(uint32_t(rate), uint32_t(bits), uint32_t(channels), int(quality), info, error)) {
         throwUsbAudio(env, error);
         return nullptr;
     }
     return toIntArray(env, {info.outputIndex, jint(info.deviceRate), jint(info.subslotBytes),
-                            jint(info.bitResolution), info.bitPerfect ? 1 : 0});
+                            jint(info.bitResolution), info.bitPerfect ? 1 : 0, jint(info.outputRate),
+                            info.resampled ? 1 : 0});
 }
 
 JNIEXPORT jint JNICALL JNI_FN(nativeWrite)(JNIEnv* env, jobject, jlong h, jobject buffer, jint frames) {

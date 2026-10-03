@@ -248,6 +248,15 @@ int main() {
         }
     });
 
+    test("chooseOutputRate prefers exact, then multiples, then nearest higher", [] {
+        CHECK(uac::chooseOutputRate(44100, {48000}) == 48000);                      // the Portronics case
+        CHECK(uac::chooseOutputRate(48000, {44100, 48000, 96000}) == 48000);        // exact
+        CHECK(uac::chooseOutputRate(44100, {48000, 88200, 96000, 176400}) == 88200);  // smallest multiple
+        CHECK(uac::chooseOutputRate(44100, {32000, 96000, 48000}) == 48000);        // nearest higher
+        CHECK(uac::chooseOutputRate(192000, {44100, 48000}) == 48000);              // nearest lower
+        CHECK(uac::chooseOutputRate(48000, {}) == 0);
+    });
+
     test("ring buffer wraps around and preserves bytes", [] {
         uac::RingBuffer rb(8);
         CHECK(rb.capacity() == 8);

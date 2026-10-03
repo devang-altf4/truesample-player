@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
     private var userVolumeDb: Float? = null
     private var fileUri: Uri? = null
     private var fileSampleRate = 0
+    @Volatile private var outputRate = 0
     private var fileTotalFrames = 0L
     private var playThread: Thread? = null
     @Volatile private var stopRequested = false
@@ -276,17 +277,33 @@ class MainActivity : ComponentActivity() {
             val pfd = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("file vanished")
             AudioDecoder.open(pfd).use { dec ->
                 val info = out.start(dec.sampleRate, dec.bitsPerSample, dec.channels)
-                val label = if (info.bitPerfect) {
-                    "${info.sampleRate} Hz · ${info.bitsPerSample}-bit → USB direct · BIT-PERFECT ✓"
-                } else {
-                    "${info.sampleRate} Hz · ${info.bitsPerSample}→${info.format.bitResolution}-bit dithered " +
-                        "(DAC limit) → USB direct"
+                outputRate = info.outputRate
+                val dacBits = info.format.bitResolution
+                val label = when {
+                    info.bitPerfect ->
+                        "${khz(info.sampleRate)} · ${info.bitsPerSample}-bit → USB direct · BIT-PERFECT ✓"
+                    info.resampled ->
+                        "${khz(info.sampleRate)} → ${khz(info.outputRate)} · ${info.bitsPerSample}→$dacBits-bit " +
+                            "→ USB direct · CONVERTED"
+                    else ->
+                        "${khz(info.sampleRate)} · ${info.bitsPerSample}→$dacBits-bit dithered → USB direct"
+                }
+                // Say plainly why the audio is not bit-perfect.
+                val reasons = buildList {
+                    if (info.resampled) {
+                        add("Your DAC can't play ${khz(info.sampleRate)}, so this song is converted to " +
+                            "${khz(info.outputRate)} (high-quality resampler).")
+                    }
+                    if (dacBits < info.bitsPerSample) {
+                        add("Your DAC can't play ${info.bitsPerSample}-bit, so it gets $dacBits-bit with dither.")
+                    }
                 }
                 ui {
-                    statusText.text = label
-                    log("Playing via alt setting ${info.format.altSetting}: ${info.format.bitResolution}-bit in " +
-                        "${info.format.subslotBytes}-byte slots" +
+                    statusText.text = (listOf(label) + reasons).joinToString("\n")
+                    log("Playing via alt setting ${info.format.altSetting}: $dacBits-bit in " +
+                        "${info.format.subslotBytes}-byte slots at ${info.outputRate} Hz" +
                         if (info.deviceRate != 0) ", DAC confirms ${info.deviceRate} Hz" else "")
+                    reasons.forEach { log(it) }
                 }
 
                 val chunkFrames = 4096
@@ -343,7 +360,9 @@ class MainActivity : ComponentActivity() {
         } catch (e: IllegalStateException) {
             return
         }
-        positionText.text = "${formatTime(stats.framesSent / fileSampleRate)} / " +
+        // framesSent counts frames at the DAC's rate, which differs from the file's when resampling.
+        val rate = if (outputRate > 0) outputRate else fileSampleRate
+        positionText.text = "${formatTime(stats.framesSent / rate)} / " +
             "${formatTime(fileTotalFrames / fileSampleRate)} · underruns ${stats.underruns}"
     }
 
@@ -370,6 +389,10 @@ class MainActivity : ComponentActivity() {
         private const val ACTION_USB_PERMISSION = "com.freeaudiobypasser.app.USB_PERMISSION"
 
         private fun formatTime(seconds: Long) = "%d:%02d".format(seconds / 60, seconds % 60)
+
+        /** 44100 -> "44.1 kHz", 48000 -> "48 kHz". */
+        private fun khz(rate: Int): String =
+            if (rate % 1000 == 0) "${rate / 1000} kHz" else "%.1f kHz".format(Locale.US, rate / 1000.0)
 
         private fun hexDump(bytes: ByteArray): String = bytes.toList().chunked(16).joinToString("\n") { row ->
             row.joinToString(" ") { "%02x".format(it) }

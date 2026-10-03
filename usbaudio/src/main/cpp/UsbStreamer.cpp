@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "Log.h"
+#include "samplerate.h"
 
 namespace {
 
@@ -105,8 +106,8 @@ bool UsbStreamer::open(int fd, const uint8_t* raw, size_t length, std::string& e
     return true;
 }
 
-bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, StreamInfo& info,
-                        std::string& error) {
+bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t channels, int resampleQuality,
+                        StreamInfo& info, std::string& error) {
     stop();
     if (!handle_) {
         error = "DAC is not open.";
@@ -120,35 +121,49 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
         return (speed >= LIBUSB_SPEED_HIGH ? 8000u : 1000u) >> std::min<uint32_t>(shift, 3);
     };
 
+    auto fits = [&](const uac::OutputFormat& f, uint32_t rate) {
+        if (f.formatTag != 1 || f.channels != channels || !f.supportsRate(rate)) return false;
+        const uint32_t maxFrames = uac::PacketScheduler(rate, packetsPerSecond(f)).maxFrames();
+        return maxFrames * f.frameBytes() <= f.maxPacketBytes;
+    };
+
+    // Play at the source rate when the DAC has it; otherwise resample to the best rate it does have.
+    std::vector<uint32_t> candidates;
+    for (const uac::OutputFormat& f : device_.outputs) {
+        if (f.continuousRates) {
+            candidates.insert(candidates.end(), {std::clamp(sampleRate, f.minRate, f.maxRate), f.minRate, f.maxRate});
+        } else {
+            candidates.insert(candidates.end(), f.rates.begin(), f.rates.end());
+        }
+    }
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                    [&](uint32_t r) {
+                                        return std::none_of(device_.outputs.begin(), device_.outputs.end(),
+                                                            [&](const uac::OutputFormat& f) { return fits(f, r); });
+                                    }),
+                     candidates.end());
+    const uint32_t outRate = uac::chooseOutputRate(sampleRate, candidates);
+    if (outRate == 0) {
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "The DAC has no %u-channel output.", channels);
+        error = msg;
+        return false;
+    }
+    const bool resampling = outRate != sampleRate;
+
     // Prefer the smallest format that holds the source losslessly; otherwise the
     // deepest one available, with dither.
     int best = -1;
     int deepest = -1;
-    bool rateOk = false, channelsOk = false;
     for (size_t i = 0; i < device_.outputs.size(); ++i) {
         const uac::OutputFormat& f = device_.outputs[i];
-        if (f.formatTag != 1 || f.channels != channels) continue;
-        channelsOk = true;
-        if (!f.supportsRate(sampleRate)) continue;
-        const uint32_t maxFrames = uac::PacketScheduler(sampleRate, packetsPerSecond(f)).maxFrames();
-        if (maxFrames * f.frameBytes() > f.maxPacketBytes) continue;
-        rateOk = true;
+        if (!fits(f, outRate)) continue;
         if (deepest < 0 || f.bitResolution > device_.outputs[deepest].bitResolution) deepest = int(i);
         if (f.bitResolution < sourceBits) continue;
         if (best < 0 || f.subslotBytes < device_.outputs[best].subslotBytes) best = int(i);
     }
-    const bool lossless = best >= 0;
-    if (!lossless) best = deepest;
-    if (best < 0) {
-        char msg[160];
-        if (!channelsOk) {
-            std::snprintf(msg, sizeof msg, "The DAC has no %u-channel output.", channels);
-        } else {
-            std::snprintf(msg, sizeof msg, "The DAC cannot play %u Hz (resampling is not built yet).", sampleRate);
-        }
-        error = msg;
-        return false;
-    }
+    const bool lossless = best >= 0 && !resampling;
+    if (resampling || best < 0) best = deepest;
 
     format_ = &device_.outputs[best];
     const uac::OutputFormat& f = *format_;
@@ -161,7 +176,7 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
 
     uint32_t deviceRate = 0;
     if (f.sampleRateControl || f.continuousRates || f.rates.size() > 1) {
-        uint8_t data[3] = {uint8_t(sampleRate), uint8_t(sampleRate >> 8), uint8_t(sampleRate >> 16)};
+        uint8_t data[3] = {uint8_t(outRate), uint8_t(outRate >> 8), uint8_t(outRate >> 16)};
         rc = libusb_control_transfer(handle_, kReqOutEndpoint, kSetCur, kSamplingFreqControl << 8,
                                      f.endpointAddress, data, 3, 1000);
         if (rc < 0) LOGW("SET_CUR sample rate failed: %s", libusb_error_name(rc));
@@ -170,27 +185,50 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
                                      f.endpointAddress, back, 3, 1000);
         if (rc == 3) deviceRate = uint32_t(back[0] | (back[1] << 8) | (back[2] << 16));
     }
-    if (deviceRate != 0 && deviceRate != sampleRate) {
+    if (deviceRate != 0 && deviceRate != outRate) {
         char msg[128];
-        std::snprintf(msg, sizeof msg, "The DAC was asked for %u Hz but switched to %u Hz.", sampleRate, deviceRate);
+        std::snprintf(msg, sizeof msg, "The DAC was asked for %u Hz but switched to %u Hz.", outRate, deviceRate);
         error = msg;
         libusb_set_interface_alt_setting(handle_, f.interfaceNumber, 0);
         format_ = nullptr;
         return false;
     }
 
+    // The previous stream's playback thread has finished (see UsbAudioOutput), so its
+    // resampler can be replaced safely here.
+    if (resampler_) resampler_ = src_delete(resampler_);
+    const size_t chunkFrames = sampleRate / 100;  // 10 ms of source audio per processing step
+    if (resampling) {
+        int err = 0;
+        resampler_ = src_new(std::clamp(resampleQuality, 0, 2), int(channels), &err);
+        if (!resampler_) {
+            error = std::string("Could not create the resampler: ") + src_strerror(err);
+            libusb_set_interface_alt_setting(handle_, f.interfaceNumber, 0);
+            format_ = nullptr;
+            return false;
+        }
+        resampleRatio_ = double(outRate) / sampleRate;
+        maxPushFrames_ = size_t(double(chunkFrames) * resampleRatio_) + 64;
+        resampleIn_.resize(chunkFrames * channels);
+        resampleOut_.resize(maxPushFrames_ * channels);
+        resampledInt_.resize(maxPushFrames_ * channels);
+    } else {
+        maxPushFrames_ = chunkFrames;
+    }
+
+    channels_ = channels;
     const uint32_t pps = packetsPerSecond(f);
-    scheduler_ = std::make_unique<uac::PacketScheduler>(sampleRate, pps);
+    scheduler_ = std::make_unique<uac::PacketScheduler>(outRate, pps);
     frameBytes_ = f.frameBytes();
     sourceSubslot_ = f.subslotBytes;
     packetsPerTransfer_ = std::max<uint32_t>(1, pps * kTransferMillis / 1000);
-    ring_ = std::make_unique<uac::RingBuffer>(size_t(sampleRate) * frameBytes_ * kRingMillis / 1000);
-    packBuffer_.resize(size_t(sampleRate / 100) * frameBytes_);  // 10 ms per pack step
-    if (lossless) {
+    ring_ = std::make_unique<uac::RingBuffer>(size_t(outRate) * frameBytes_ * kRingMillis / 1000);
+    packBuffer_.resize(maxPushFrames_ * frameBytes_);
+    if (lossless || f.bitResolution >= 32) {
         ditherer_.reset();
     } else {
         ditherer_ = std::make_unique<uac::Ditherer>(f.bitResolution);
-        ditherBuffer_.resize(size_t(sampleRate / 100) * f.channels);
+        ditherBuffer_.resize(maxPushFrames_ * f.channels);
     }
 
     const size_t transferBytes = size_t(packetsPerTransfer_) * scheduler_->maxFrames() * frameBytes_;
@@ -221,13 +259,15 @@ bool UsbStreamer::start(uint32_t sampleRate, uint32_t sourceBits, uint32_t chann
 
     info.outputIndex = best;
     info.sampleRate = sampleRate;
+    info.outputRate = outRate;
     info.deviceRate = deviceRate;
     info.subslotBytes = f.subslotBytes;
     info.bitResolution = f.bitResolution;
     info.bitPerfect = lossless;
-    LOGI("streaming %u Hz, %u-bit source -> alt %u (%u-bit in %u-byte slots%s), %u packets/s, %u packets/transfer",
-         sampleRate, sourceBits, f.altSetting, f.bitResolution, f.subslotBytes, lossless ? "" : ", dithered", pps,
-         packetsPerTransfer_);
+    info.resampled = resampling;
+    LOGI("streaming %u Hz %u-bit source -> %u Hz, alt %u (%u-bit in %u-byte slots)%s%s, %u packets/s", sampleRate,
+         sourceBits, outRate, f.altSetting, f.bitResolution, f.subslotBytes, resampling ? ", resampled" : "",
+         ditherer_ ? ", dithered" : "", pps);
     return true;
 }
 
@@ -288,39 +328,78 @@ void UsbStreamer::eventLoop() {
 
 long UsbStreamer::write(const int32_t* pcm, size_t frames) {
     if (!streaming_) return -1;
-    const size_t channels = format_->channels;
-    const size_t chunkFrames = packBuffer_.size() / frameBytes_;
-    size_t done = 0;
-    while (done < frames) {
+    const size_t channels = channels_;
+    const size_t chunkFrames = resampler_ ? resampleIn_.size() / channels : maxPushFrames_;
+    for (size_t done = 0; done < frames;) {
         const size_t n = std::min(chunkFrames, frames - done);
         const int32_t* src = pcm + done * channels;
-        if (ditherer_) {
-            ditherer_->process(src, ditherBuffer_.data(), n * channels);
-            src = ditherBuffer_.data();
+        bool ok;
+        if (resampler_) {
+            src_int_to_float_array(src, resampleIn_.data(), int(n * channels));
+            ok = resampleAndPush(n, false);
+        } else {
+            ok = push(src, n);
         }
-        uac::packSamples(src, packBuffer_.data(), n * channels, sourceSubslot_);
-        const uint8_t* p = packBuffer_.data();
-        size_t left = n * frameBytes_;
-        while (left > 0) {
-            if (!streaming_) return -1;
-            size_t space = ring_->writable();
-            space -= space % frameBytes_;
-            const size_t w = ring_->write(p, std::min(left, space));
-            if (w > 0) {
-                primed_ = true;
-                p += w;
-                left -= w;
-                continue;
-            }
-            std::unique_lock<std::mutex> lock(spaceMutex_);
-            spaceCv_.wait_for(lock, std::chrono::milliseconds(20));
-        }
+        if (!ok) return -1;
         done += n;
     }
-    return long(done);
+    return long(frames);
+}
+
+bool UsbStreamer::resampleAndPush(size_t frames, bool endOfInput) {
+    const long channels = long(channels_);
+    SRC_DATA d{};
+    d.data_in = resampleIn_.data();
+    d.input_frames = long(frames);
+    d.data_out = resampleOut_.data();
+    d.output_frames = long(resampleOut_.size()) / channels;
+    d.end_of_input = endOfInput ? 1 : 0;
+    d.src_ratio = resampleRatio_;
+    while (true) {
+        const int err = src_process(resampler_, &d);
+        if (err != 0) {
+            LOGE("resampler failed: %s", src_strerror(err));
+            return false;
+        }
+        if (d.output_frames_gen > 0) {
+            src_float_to_int_array(resampleOut_.data(), resampledInt_.data(), int(d.output_frames_gen * channels));
+            if (!push(resampledInt_.data(), size_t(d.output_frames_gen))) return false;
+        }
+        d.data_in += d.input_frames_used * channels;
+        d.input_frames -= d.input_frames_used;
+        const bool progressed = d.input_frames_used > 0 || d.output_frames_gen > 0;
+        if (!progressed || (d.input_frames == 0 && !endOfInput)) return true;
+    }
+}
+
+bool UsbStreamer::push(const int32_t* src, size_t frames) {
+    const size_t channels = channels_;
+    if (ditherer_) {
+        ditherer_->process(src, ditherBuffer_.data(), frames * channels);
+        src = ditherBuffer_.data();
+    }
+    uac::packSamples(src, packBuffer_.data(), frames * channels, sourceSubslot_);
+    const uint8_t* p = packBuffer_.data();
+    size_t left = frames * frameBytes_;
+    while (left > 0) {
+        if (!streaming_) return false;
+        size_t space = ring_->writable();
+        space -= space % frameBytes_;
+        const size_t w = ring_->write(p, std::min(left, space));
+        if (w > 0) {
+            primed_ = true;
+            p += w;
+            left -= w;
+            continue;
+        }
+        std::unique_lock<std::mutex> lock(spaceMutex_);
+        spaceCv_.wait_for(lock, std::chrono::milliseconds(20));
+    }
+    return true;
 }
 
 void UsbStreamer::drain() {
+    if (resampler_ && streaming_) resampleAndPush(0, true);  // flush the resampler's tail
     primed_ = false;  // the ring running dry from here on is the end of the track, not an underrun
     while (streaming_ && ring_ && ring_->readable() > 0) {
         std::unique_lock<std::mutex> lock(spaceMutex_);
@@ -380,6 +459,7 @@ void UsbStreamer::close() {
         ctx_ = nullptr;
     }
     featureUnit_ = nullptr;
+    if (resampler_) resampler_ = src_delete(resampler_);
 }
 
 int UsbStreamer::controlFeature(uint8_t request, uint8_t control, uint8_t channel, uint8_t* data, uint16_t length) {

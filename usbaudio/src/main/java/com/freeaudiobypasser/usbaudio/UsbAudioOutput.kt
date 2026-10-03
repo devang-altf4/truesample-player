@@ -28,14 +28,23 @@ data class DacFormat(
 }
 
 data class StreamInfo(
+    /** The source's sample rate. */
     val sampleRate: Int,
     val bitsPerSample: Int,
     val channels: Int,
     val format: DacFormat,
+    /** The rate the DAC runs at; differs from [sampleRate] when [resampled]. */
+    val outputRate: Int,
     /** Rate the DAC reports after switching, or 0 if it cannot report one. */
     val deviceRate: Int,
+    /** True when the DAC receives the source samples unchanged. */
     val bitPerfect: Boolean,
+    /** True when the DAC lacks [sampleRate] and audio is converted to [outputRate]. */
+    val resampled: Boolean,
 )
+
+/** libsamplerate sinc converter used when the DAC lacks the source rate. */
+enum class ResampleQuality { BEST, MEDIUM, FAST }
 
 data class VolumeRange(val minDb: Float, val maxDb: Float, val stepDb: Float, val currentDb: Float)
 
@@ -78,13 +87,29 @@ class UsbAudioOutput private constructor(
 
     /**
      * Selects the matching DAC mode and starts streaming silence until [write] supplies audio.
-     * If the DAC has fewer bits than [bitsPerSample], audio is reduced with TPDF dither and
-     * [StreamInfo.bitPerfect] is false. Throws [UsbAudioException] if the DAC cannot play the rate.
+     * If the DAC lacks [sampleRate], audio is resampled (with [quality]) to the best rate it
+     * supports; if it has fewer bits than [bitsPerSample], audio is reduced with TPDF dither.
+     * Either way [StreamInfo.bitPerfect] is false. Throws [UsbAudioException] if the DAC has no
+     * output with [channels] channels.
      */
-    fun start(sampleRate: Int, bitsPerSample: Int, channels: Int): StreamInfo = synchronized(lock) {
+    fun start(
+        sampleRate: Int,
+        bitsPerSample: Int,
+        channels: Int,
+        quality: ResampleQuality = ResampleQuality.BEST,
+    ): StreamInfo = synchronized(lock) {
         checkOpen()
-        val r = NativeBridge.nativeStart(handle, sampleRate, bitsPerSample, channels)
-        StreamInfo(sampleRate, bitsPerSample, channels, formats[r[0]], r[1], r[4] == 1)
+        val r = NativeBridge.nativeStart(handle, sampleRate, bitsPerSample, channels, quality.ordinal)
+        StreamInfo(
+            sampleRate = sampleRate,
+            bitsPerSample = bitsPerSample,
+            channels = channels,
+            format = formats[r[0]],
+            outputRate = r[5],
+            deviceRate = r[1],
+            bitPerfect = r[4] == 1,
+            resampled = r[6] == 1,
+        )
     }
 
     /**
